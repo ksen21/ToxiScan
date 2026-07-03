@@ -52,10 +52,43 @@
 
 ---
 
+## Phase 1 Decisions (Jul 2026)
+
+**[Jul 2026] Chemicals seed strategy: Full list in seed_chemicals.py, future additions via Atlas UI**
+- Reason: Poori 62 chemicals ki list ek baar seed_chemicals.py se MongoDB mein daali.
+- Future mein naye chemicals Atlas UI / Compass se directly insert honge — no code change needed.
+- chemical_template.json banaya as reference for correct schema when adding new chemicals.
+- Alternative considered: CSV import script — rejected kyunki Atlas UI already simple enough hai.
+
+**[Jul 2026] Chemicals schema: category field add kiya**
+- Reason: SPEC.md ke original schema mein category nahi tha, lekin add kiya grouping ke liye.
+- Filtering by category (e.g. "Paraben", "PFAS") future mein UI mein useful hoga.
+- SPEC.md update karna hai: chemicals schema mein `category` field add karo.
+
+**[Jul 2026] MongoDB cluster name: Cluster0ToxiSCAN**
+- Atlas M0 free tier, AWS Mumbai (ap-south-1) region — India ke users ke liye low latency.
+- Connection string format: `mongodb+srv://KartiekSen:***@cluster0toxiscan.ylghiy5.mongodb.net/toxiscan`
+
+**[Jul 2026] Motor (async) driver chosen over PyMongo (sync)**
+- Reason: FastAPI is async-first. Motor = async MongoDB driver, fits perfectly with FastAPI + asyncio.
+- Atlas UI mein "PyMongo Asynchronous" select kiya connection string ke liye.
+
+**[Jul 2026] Password special characters issue — noted**
+- pymongo.errors.InvalidURI error aaya kyunki password mein special characters the.
+- Fix: Atlas se password change karke simple alphanumeric rakha.
+- Rule: MongoDB Atlas password mein sirf letters + numbers use karo (no @, #, ! etc.)
+
+**[Jul 2026] Indexes created on chemicals collection**
+- Indexes: `name`, `category`, `severity`
+- Reason: Fuzzy matching aur filtering ke liye faster queries.
+
+---
+
 ## Future Decisions (TBD)
 
 - [ ] Which specific Groq vision model alias in NaraRouter? (check /v1/models)
 - [ ] Which text model alias for ingredient parsing?
 - [ ] Scan logs async write strategy (motor background task vs FastAPI BackgroundTasks)
+- [ ] SPEC.md update: add `category` field to chemicals schema
 - [ ] v2: User accounts + history (likely Supabase Auth or Firebase Auth)
 - [ ] v2: Barcode scanning feature
