@@ -1,0 +1,109 @@
+{
+  "_guide": {
+    "title": "ToxiScan — Chemical Add Karne Ka Template",
+    "steps": [
+      "1. Is file se ek chemical ka block copy karo (examples section se)",
+      "2. MongoDB Atlas UI kholo → toxiscan → chemicals → Insert Document",
+      "3. JSON paste karo, values apni chemical ke hisaab se badlo",
+      "4. '_guide' aur '_examples' fields DELETE karo before inserting",
+      "5. Insert karo — ho gaya"
+    ],
+    "required_fields": ["name", "aliases", "category", "danger_type", "severity", "description", "research_url", "added_date", "last_updated"],
+    "allowed_severity": ["High", "Medium", "Low"],
+    "allowed_danger_type": ["Carcinogen", "Irritant", "Sensitive Skin Issue"],
+    "allowed_categories": [
+      "Formaldehyde",
+      "Formaldehyde Releaser",
+      "Paraben",
+      "Isothiazolinone Preservative",
+      "Phenoxyethanol Group",
+      "BHT/BHA Family",
+      "Phthalate",
+      "PFAS",
+      "Aluminum Compound",
+      "Ethoxylated Ingredient",
+      "Fragrance",
+      "Artificial Colour",
+      "Other"
+    ],
+    "severity_guide": {
+      "High": "Carcinogen confirmed / banned in EU or US / strong endocrine disruptor",
+      "Medium": "Possible carcinogen / restricted / known irritant / contamination risk",
+      "Low": "Mild concern / pore-clogging / preference-based avoid"
+    },
+    "aliases_tip": "Jitne zyada aliases, utna better fuzzy matching. INCI name, common name, brand names, abbreviations — sab daalo.",
+    "research_url_tip": "Agar URL nahi pata toh null rakho — Tavily automatically search karega."
+  },
+
+  "_examples": {
+
+    "example_high_severity": {
+      "name": "Butylparaben",
+      "aliases": [
+        "butylparaben",
+        "butyl paraben",
+        "butyl 4-hydroxybenzoate",
+        "nipabutyl"
+      ],
+      "category": "Paraben",
+      "danger_type": ["Carcinogen", "Sensitive Skin Issue"],
+      "severity": "High",
+      "description": "Strongest endocrine disruption among common parabens. Linked to breast cancer cell proliferation and reproductive harm.",
+      "research_url": null,
+      "added_date": { "$date": "2026-07-01T00:00:00Z" },
+      "last_updated": { "$date": "2026-07-01T00:00:00Z" }
+    },
+
+    "example_medium_severity": {
+      "name": "Phenoxyethanol",
+      "aliases": [
+        "phenoxyethanol",
+        "2-phenoxyethanol",
+        "ethylene glycol monophenyl ether",
+        "phenoxetol"
+      ],
+      "category": "Phenoxyethanol Group",
+      "danger_type": ["Irritant", "Sensitive Skin Issue"],
+      "severity": "Medium",
+      "description": "Common preservative. Can cause skin, eye, and lung irritation. France warned against use in products for babies under 3.",
+      "research_url": null,
+      "added_date": { "$date": "2026-07-01T00:00:00Z" },
+      "last_updated": { "$date": "2026-07-01T00:00:00Z" }
+    },
+
+    "example_low_severity": {
+      "name": "Isopropyl Myristate",
+      "aliases": [
+        "isopropyl myristate",
+        "IPM",
+        "tetradecanoic acid isopropyl ester",
+        "crodamol ipm"
+      ],
+      "category": "Other",
+      "danger_type": ["Sensitive Skin Issue"],
+      "severity": "Low",
+      "description": "Emollient and penetration enhancer. Can clog pores and cause comedonal acne. Also enhances absorption of other harmful ingredients.",
+      "research_url": null,
+      "added_date": { "$date": "2026-07-01T00:00:00Z" },
+      "last_updated": { "$date": "2026-07-01T00:00:00Z" }
+    }
+  },
+
+  "_blank_template": {
+    "COPY_THIS": "Yeh blank template copy karo aur fill karo",
+    "name": "Chemical Ka Official INCI Ya Common Name",
+    "aliases": [
+      "alternate name 1",
+      "alternate name 2",
+      "abbreviation",
+      "brand name if any"
+    ],
+    "category": "Paraben",
+    "danger_type": ["Carcinogen"],
+    "severity": "High",
+    "description": "1-2 line mein clearly batao yeh chemical kyu harmful hai. Plain language mein — user chemistry expert nahi hai.",
+    "research_url": null,
+    "added_date": { "$date": "2026-07-01T00:00:00Z" },
+    "last_updated": { "$date": "2026-07-01T00:00:00Z" }
+  }
+}
