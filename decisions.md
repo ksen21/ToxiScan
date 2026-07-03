@@ -84,6 +84,55 @@
 
 ---
 
+## Phase 2 — FastAPI Backend Skeleton (Completed: 2026-07-03)
+
+**What was built:**
+- `main.py` — FastAPI app with lifespan startup/shutdown hooks, CORS middleware
+- `services/config.py` — Pydantic-settings based config, loads `.env` (MONGODB_URI, GROQ_API_KEY, GEMINI_API_KEY, ALLOWED_ORIGINS)
+- `services/db.py` — Motor async MongoDB client with connection pooling (maxPoolSize=10), connects on startup / closes on shutdown, `get_db()` dependency injector
+- `models/schemas.py` — Pydantic v2 models: `ChemicalBase`/`ChemicalOut`, `ScanRequest`/`ScanResponse`, `IngredientResult`, `HealthResponse`, plus `SeverityLevel` and `ChemicalCategory` enums
+- `routers/health.py` — `GET /health` endpoint, pings DB and reports connection status
+- `requirements.txt` — fastapi, uvicorn, motor, pydantic, pydantic-settings, python-dotenv, httpx, Pillow, groq, google-generativeai, slowapi
+
+**Issues found & fixed:**
+- Initial `requirements.txt` pinned `pymongo==4.10.1` directly, which conflicted with `motor==3.6.0`'s internal dependency on `pymongo<4.10`. Fix: removed the explicit pymongo pin and let motor manage its own compatible version.
+- Dev machine had Python 3.14 installed, which is too new — Pillow and pydantic-core had no prebuilt wheels and failed building from source (missing Rust/zlib toolchain). Fix: installed Python 3.12 side-by-side and recreated the venv with `py -3.12 -m venv venv`.
+
+**Verified:** `uvicorn main:app --reload` runs clean; `/health` returns `{"status":"ok","environment":"development","db_connected":true}`; MongoDB connects successfully on startup (confirmed via logs).
+
+---
+
+## Phase 3 — Text Scan Endpoint (Completed: 2026-07-03)
+
+**What was built:**
+- `POST /scan/text` endpoint — accepts raw ingredient list text + optional product name
+- `services/scanner.py` — core matching + scoring logic
+  - `split_ingredients()` — splits raw text on `,` `;` `/`
+  - `match_ingredient()` — exact case-insensitive match against `chemicals.name` and `chemicals.aliases`
+  - `calculate_safety_score()` — starts at 100, deducts points per flagged ingredient by severity (low: -5, moderate: -12, high: -22, critical: -35)
+- Safety labels: Safe (85+), Moderate (60-84), Risky (35-59), Dangerous (<35)
+
+**Issue found & fixed:**
+- DB seed data stores severity as `"Low"/"Medium"/"High"` (mixed case, "Medium" not "moderate") — Pydantic enum validation was failing on exact match.
+- Fix: added `normalize_severity()` in scanner.py that maps any casing/wording (medium→moderate, severe→high, etc.) to the canonical `SeverityLevel` enum before returning results.
+
+**Verified:** 67 chemicals confirmed in DB (not 62 as originally estimated) via `list_chemicals.py` utility script. Specific chemical names (e.g. Butylparaben, BHT, Bronopol) matched correctly with score/label calculated as expected.
+
+---
+
+## Phase 4 — Fuzzy/Partial Ingredient Matching (Completed: 2026-07-03)
+
+**Problem:** Product labels often list generic terms ("Parabens", "SLS") rather than the exact specific chemical name stored in the DB (e.g. "Butylparaben"). Exact match alone missed these.
+
+**What was built:**
+- Extended `match_ingredient()` in `services/scanner.py` with a fallback fuzzy match, triggered only when exact match fails and ingredient length >= 4 chars:
+  - **Case A:** ingredient text contains a DB name/alias as substring (e.g. "Parabens (Butylparaben)")
+  - **Case B:** ingredient's singular root (trailing "s" stripped) appears inside a DB name/alias (e.g. "Parabens" → "Paraben" → matches "Butylparaben")
+
+**Known limitation:** When a generic term matches multiple possible chemicals (e.g. "Parabens" could mean any of several parabens in DB), only the first DB match found is returned — not an aggregate of all matching chemicals. Acceptable for MVP; can be revisited if false precision becomes an issue.
+
+**Verified:** Generic terms like "Parabens" and "SLS" now correctly resolve to a specific matched chemical with severity/concerns.
+
 ## Future Decisions (TBD)
 
 - [ ] Which specific Groq vision model alias in NaraRouter? (check /v1/models)
@@ -92,3 +141,40 @@
 - [ ] SPEC.md update: add `category` field to chemicals schema
 - [ ] v2: User accounts + history (likely Supabase Auth or Firebase Auth)
 - [ ] v2: Barcode scanning feature
+
+
+
+## Phase 5 — Image Scan Endpoint / OCR (Completed: 2026-07-03)
+
+What was built:
+
+
+services/ocr.py — sends a product label photo to Groq's vision-capable model (meta-llama/llama-4-scout-17b-16e-instruct) with an extraction prompt, returns the raw comma-separated ingredients text. Raises ValueError if no ingredients list is detected in the image.
+POST /scan/image in routers/scan.py — accepts a multipart file upload (JPEG/PNG/WebP, max 8MB) + optional product_name form field:
+
+Validates content type and file size
+Runs OCR via extract_ingredients_from_image()
+Feeds extracted text into the existing scan_ingredients() + calculate_safety_score() pipeline (same logic as /scan/text)
+Returns the same ScanResponse shape as the text endpoint
+
+
+
+
+
+## Design decisions:
+
+
+Reused the Phase 3/4 matching pipeline entirely — OCR output just becomes the input string, no duplicate scanning logic.
+Image encoded as base64 data URL and sent inline in the Groq chat completion request (no separate file storage needed).
+Error handling: 400 for bad file type/size, 422 if OCR finds no ingredients, 502 if the OCR API call itself fails.
+
+
+## Requires: GROQ_API_KEY set in .env (from console.groq.com).
+
+## Status: Verified with a real product label photo — OCR extracted 26 ingredients correctly, 9 flagged (e.g. Mineral Oil matched at moderate severity), safety score/label computed correctly (score 0, "Dangerous").
+
+Additional issues found & fixed during testing:
+
+
+groq client raised TypeError: AsyncClient.__init__() got an unexpected keyword argument 'proxies' — caused by httpx==0.28.0 removing the proxies kwarg that the installed groq version still passed internally. Fix: pinned httpx==0.27.2 in requirements.txt.
+MongoDB connection started failing with SSLV1_ALERT_INTERNAL_ERROR / TLSV1_ALERT_INTERNAL_ERROR across all shard servers (ServerSelectionTimeoutError) after the Python 3.12 venv was recreated. Root cause was environmental (Atlas IP whitelist / antivirus SSL inspection on Windows), not application code — resolved after checking Atlas Network Access and system SSL interception settings. Added certifi.where() as an explicit tlsCAFile in services/db.py as a defensive measure for Windows CA store issues
