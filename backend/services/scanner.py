@@ -100,8 +100,11 @@ async def match_ingredient(db: AsyncIOMotorDatabase, ingredient: str) -> Ingredi
             ingredient=ingredient,
             matched_chemical=doc["name"],
             severity=normalize_severity(doc.get("severity")),
-            concerns=doc.get("concerns", []),
+            # DB field is `danger_type` (see chemical_template.json / seed_chemicals.py),
+            # not `concerns` — fixed while wiring up Phase 6 research_url passthrough.
+            concerns=doc.get("danger_type", []),
             is_flagged=True,
+            research_url=doc.get("research_url"),
         )
 
     return IngredientResult(
@@ -110,6 +113,7 @@ async def match_ingredient(db: AsyncIOMotorDatabase, ingredient: str) -> Ingredi
         severity=None,
         concerns=[],
         is_flagged=False,
+        research_url=None,
     )
 
 

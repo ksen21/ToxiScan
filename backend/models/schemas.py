@@ -68,6 +68,7 @@ class IngredientResult(BaseModel):
     severity: Optional[SeverityLevel] = None
     concerns: List[str] = []
     is_flagged: bool = False
+    research_url: Optional[str] = None       # from DB, or temporary Tavily result (Phase 6)
 
 
 class ScanResponse(BaseModel):

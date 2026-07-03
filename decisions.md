@@ -178,3 +178,45 @@ Additional issues found & fixed during testing:
 
 groq client raised TypeError: AsyncClient.__init__() got an unexpected keyword argument 'proxies' — caused by httpx==0.28.0 removing the proxies kwarg that the installed groq version still passed internally. Fix: pinned httpx==0.27.2 in requirements.txt.
 MongoDB connection started failing with SSLV1_ALERT_INTERNAL_ERROR / TLSV1_ALERT_INTERNAL_ERROR across all shard servers (ServerSelectionTimeoutError) after the Python 3.12 venv was recreated. Root cause was environmental (Atlas IP whitelist / antivirus SSL inspection on Windows), not application code — resolved after checking Atlas Network Access and system SSL interception settings. Added certifi.where() as an explicit tlsCAFile in services/db.py as a defensive measure for Windows CA store issues
+
+
+
+## Phase 6 — Tavily Web Search Integration (Completed: 2026-07-03)
+
+What was built:
+
+
+services/search.py — enrich_with_research_urls(results):
+
+Only queries chemicals that are is_flagged=True, have a matched_chemical, and research_url is None.
+Query format: "{chemical_name} cancer carcinogen cosmetic research study", max_results=1.
+Hard cap: MAX_TAVILY_CALLS_PER_REQUEST = 5, enforced with a running counter — loop breaks the moment the cap is hit, regardless of how many chemicals still need a URL.
+tavily-python's TavilyClient is sync-only, so the actual call runs via asyncio.to_thread() to avoid blocking the event loop.
+Tavily errors/empty results → caught, logged, research_url stays None — never raised to the route handler.
+Results are set only on the in-memory IngredientResult objects for this response — never written back to MongoDB (matches project_rule.md: manual admin decision to add permanent URLs).
+Logs "Tavily usage — N call(s) this request" once per request (only if calls were made) for free-tier (1,000/month) monitoring.
+If TAVILY_API_KEY isn't set in .env, the client init is skipped and enrichment is a no-op (logged once) — app doesn't crash without a key.
+
+
+
+Wired into both POST /scan/text and POST /scan/image in routers/scan.py, called once right after scan_ingredients() and before calculate_safety_score() (score itself is unaffected by research_url).
+models/schemas.py — added research_url: Optional[str] = None to IngredientResult.
+services/config.py / env.example — added TAVILY_API_KEY.
+requirements.txt — added tavily-python==0.5.0.
+
+
+Bug found & fixed while wiring this up:
+
+
+services/scanner.py::match_ingredient() was reading doc.get("concerns", []) from MongoDB, but the actual seeded chemical documents use the field name danger_type (see chemical_template.json, seed_chemicals.py) — concerns doesn't exist in the DB at all, so this was always returning [] silently since Phase 3. Fixed to doc.get("danger_type", []). Also added research_url=doc.get("research_url") in the same place, needed for Phase 6 to know which chemicals already have a permanent URL.
+
+
+Not yet verified live: tavily-python could not be pip-installed or hit in this sandbox (no network access / no TAVILY_API_KEY available here). Logic (5-call cap, skip-if-already-has-url, skip-if-not-flagged, mutate-in-place) was verified with a mocked TavilyClient — all cases pass. TODO next session: run a real /scan/text request locally with a valid TAVILY_API_KEY against a chemical known to have research_url: null in DB (e.g. Imidazolidinyl Urea, Fragrance, Talc — see seed_chemicals.py) and confirm a real URL comes back in the response.
+
+Verified (offline, mocked):
+
+
+8 flagged chemicals missing research_url → exactly 5 Tavily calls made, 5 enriched, 3 skipped.
+Chemical that already has a research_url → left untouched, no Tavily call.
+Non-flagged ingredient → left untouched, no Tavily call.
+Missing TAVILY_API_KEY → enrichment no-ops cleanly, no crash

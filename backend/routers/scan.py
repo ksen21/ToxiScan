@@ -9,6 +9,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from services.db import get_db
 from services.scanner import scan_ingredients, calculate_safety_score
 from services.ocr import extract_ingredients_from_image
+from services.search import enrich_with_research_urls
 from models.schemas import ScanRequest, ScanResponse
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,8 @@ async def scan_text(
 
     if not results:
         raise HTTPException(status_code=400, detail="No ingredients could be parsed from input")
+
+    results = await enrich_with_research_urls(results)
 
     score, label = calculate_safety_score(results)
     flagged_count = sum(1 for r in results if r.is_flagged)
@@ -88,6 +91,8 @@ async def scan_image(
 
     if not results:
         raise HTTPException(status_code=400, detail="No ingredients could be parsed from image text")
+
+    results = await enrich_with_research_urls(results)
 
     score, label = calculate_safety_score(results)
     flagged_count = sum(1 for r in results if r.is_flagged)
