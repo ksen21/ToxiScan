@@ -76,6 +76,8 @@ class ScanResponse(BaseModel):
     total_ingredients: int
     flagged_count: int
     safety_score: int = Field(..., ge=0, le=100)  # 100 = safest
+    score_out_of_10: float                         # e.g. 6.6 — for "6.6/10" display
+    star_rating: float                             # e.g. 3.3 — out of 5, for star widgets
     safety_label: str                              # "Safe", "Moderate", "Risky", "Dangerous"
     results: List[IngredientResult]
     scanned_at: datetime = Field(default_factory=datetime.utcnow)

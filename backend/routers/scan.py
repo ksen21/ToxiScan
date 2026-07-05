@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from services.db import get_db
-from services.scanner import scan_ingredients, calculate_safety_score
+from services.scanner import scan_ingredients, calculate_safety_score, derive_display_scores
 from services.ocr import extract_ingredients_from_image
 from services.search import enrich_with_research_urls
 from models.schemas import ScanRequest, ScanResponse
@@ -39,6 +39,7 @@ async def scan_text(
     results = await enrich_with_research_urls(results)
 
     score, label = calculate_safety_score(results)
+    score_out_of_10, star_rating = derive_display_scores(score)
     flagged_count = sum(1 for r in results if r.is_flagged)
 
     logger.info(
@@ -50,6 +51,8 @@ async def scan_text(
         total_ingredients=len(results),
         flagged_count=flagged_count,
         safety_score=score,
+        score_out_of_10=score_out_of_10,
+        star_rating=star_rating,
         safety_label=label,
         results=results,
     )
@@ -95,6 +98,7 @@ async def scan_image(
     results = await enrich_with_research_urls(results)
 
     score, label = calculate_safety_score(results)
+    score_out_of_10, star_rating = derive_display_scores(score)
     flagged_count = sum(1 for r in results if r.is_flagged)
 
     logger.info(
@@ -106,6 +110,8 @@ async def scan_image(
         total_ingredients=len(results),
         flagged_count=flagged_count,
         safety_score=score,
+        score_out_of_10=score_out_of_10,
+        star_rating=star_rating,
         safety_label=label,
         results=results,
     )

@@ -124,6 +124,24 @@ async def scan_ingredients(db: AsyncIOMotorDatabase, raw_text: str) -> List[Ingr
     return results
 
 
+def score_to_label(score: int) -> str:
+    """
+    Maps a 0-100 safety_score to its display label.
+    Thresholds: >=85 Safe, >=60 Moderate, >=35 Risky, else Dangerous.
+    Split out from calculate_safety_score so the boundaries can be
+    unit-tested directly against any score, not just ones reachable
+    by summing SEVERITY_PENALTY combinations.
+    """
+    if score >= 85:
+        return "Safe"
+    elif score >= 60:
+        return "Moderate"
+    elif score >= 35:
+        return "Risky"
+    else:
+        return "Dangerous"
+
+
 def calculate_safety_score(results: List[IngredientResult]) -> tuple[int, str]:
     """
     Starts at 100 and deducts points per flagged ingredient based on severity.
@@ -135,14 +153,18 @@ def calculate_safety_score(results: List[IngredientResult]) -> tuple[int, str]:
             score -= SEVERITY_PENALTY.get(r.severity, 10)
 
     score = max(0, min(100, score))
-
-    if score >= 85:
-        label = "Safe"
-    elif score >= 60:
-        label = "Moderate"
-    elif score >= 35:
-        label = "Risky"
-    else:
-        label = "Dangerous"
+    label = score_to_label(score)
 
     return score, label
+
+
+def derive_display_scores(score: int) -> tuple[float, float]:
+    """
+    Converts the internal 0-100 safety_score into frontend-friendly display
+    values, without changing how the score itself is calculated:
+    - score_out_of_10: e.g. 66 -> 6.6 (for "6.6/10" text)
+    - star_rating: e.g. 66 -> 3.3 (out of 5 stars, supports half-stars)
+    """
+    score_out_of_10 = round(score / 10, 1)
+    star_rating = round(score / 20, 1)
+    return score_out_of_10, star_rating

@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     GROQ_API_KEY: str = ""
     GEMINI_API_KEY: str = ""
 
+    # Web Search
+    TAVILY_API_KEY: str = ""
+
     # App
     APP_ENV: str = "development"
     ALLOWED_ORIGINS: str = "http://localhost:3000"
