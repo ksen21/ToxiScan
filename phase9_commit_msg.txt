@@ -1,0 +1,14 @@
+feat(scan): add search-by-product-name endpoint
+
+- New services/product_lookup.py: Tavily search + Groq extraction to
+  turn a bare product name (or direct product-page URL) into an
+  ingredients string
+- New POST /scan/product-name endpoint, reuses the existing
+  scan_ingredients() -> enrich_with_research_urls() ->
+  calculate_safety_score() pipeline (no parallel scoring path)
+- New ProductNameScanRequest schema (product_name, min_length=2)
+- Frontend: third "Search by name" tab in UploadForm.tsx, wired in
+  page.tsx with the same loading/error/cold-start state machine
+
+Fixes gap where entering only a product name in "Paste ingredients"
+mode left the Scan button permanently disabled.
