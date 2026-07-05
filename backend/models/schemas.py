@@ -79,6 +79,10 @@ class IngredientResult(BaseModel):
     concerns: List[str] = []
     is_flagged: bool = False
     research_url: Optional[str] = None       # from DB, or temporary Tavily result (Phase 6)
+    # Verification for NON-flagged ingredients only (see services/ingredient_verify.py).
+    # None means "not verified" — frontend must treat this as uncertain, never as safe.
+    verification_status: Optional[str] = None   # "verified_safe" | "uncertain" | None
+    verification_note: Optional[str] = None
 
 
 class ScanResponse(BaseModel):

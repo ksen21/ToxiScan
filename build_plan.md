@@ -240,7 +240,44 @@ Expected score: 10 - 2.5 - 1.5 = 6.0 → CAUTION verdict
 
 ---
 
-## Phase 10 — Polish
+## Phase 10 — "Good Ingredients" Verification (Completed: 2026-07-05)
+
+**Goal:** Stop labeling every non-flagged ingredient as "Good" by default — actually verify it before making that claim.
+
+**Problem:** "Good ingredients" previously meant only "not matched in our curated harmful-chemicals DB" — not "confirmed safe". Since the DB only covers a curated known-harmful list, an unmatched ingredient could be genuinely safe OR simply something the DB has no opinion on.
+
+**Tasks:**
+- `backend/services/ingredient_verify.py` — one batched Groq call (`llama-3.3-70b-versatile`) per scan, classifying all non-flagged ingredients as `verified_safe` (only when genuinely confident, per cosmetic-science/regulatory consensus) or `uncertain` (limited/mixed data, unrecognized, or any reason for caution) — deliberately conservative, defaults to `uncertain` when not confident
+- Trained-knowledge only — no Tavily/web search for this feature (user's explicit scope decision, for speed/cost)
+- Capped at 60 ingredients per call; excess left unverified (treated as uncertain downstream)
+- Does NOT touch `safety_score` — purely informational, kept fully separate from scoring math
+- Fails closed: any error leaves `verification_status = None`, treated the same as `uncertain` everywhere downstream — never silently "good"
+- `backend/models/schemas.py` — `verification_status` + `verification_note` added to `IngredientResult`
+- `backend/routers/scan.py` — wired into all three endpoints (`/scan/text`, `/scan/product-name`, `/scan/image`), right after `enrich_with_research_urls()`
+- `frontend/lib/types.ts` — new `VerificationStatus` type + fields
+- `frontend/components/ResultCard.tsx` — "Good ingredients" now filters to `verified_safe` only; new third section **"Uncertain / Limited Data"** (uses existing `caution` amber token) for everything else non-flagged, with a disclaimer note; "All ingredients" list now shows 3 icon states instead of 2; tooltip shows `verification_note` per ingredient
+
+**Design decisions (user's explicit choices — see decisions.md for full detail):**
+- Verification depth: trained-knowledge-only batched call, not LLM+Tavily research
+- Uncertain-ingredient display: separate third section, not folded into "Good" with a footnote
+
+**Deliverables:**
+- `backend/services/ingredient_verify.py` (new)
+- Updated `models/schemas.py`, `routers/scan.py`
+- Updated `frontend/lib/types.ts`, `frontend/components/ResultCard.tsx`
+
+**Done criteria:**
+- "Good ingredients" badge only ever applied to model-confirmed-safe ingredients
+- Unverified/uncertain ingredients render in their own distinct section, never mislabeled as good
+- `safety_score` calculation unaffected — still pure Python math
+
+**Not yet verified live — TODO next session:** see decisions.md Phase 10 entry (real Groq call test with varied ingredients, case-insensitive name matching check, latency check on large ingredient lists, real-browser render check for the new UI section).
+
+*(Full rationale, tradeoffs, and known cost/latency caveat documented in decisions.md — this entry is the build-plan summary.)*
+
+---
+
+## Phase 11 — Polish
 
 **Goal:** Edge cases, UX improvements, error handling.
 
@@ -261,7 +298,7 @@ Expected score: 10 - 2.5 - 1.5 = 6.0 → CAUTION verdict
 
 ---
 
-## Phase 11 — Deploy
+## Phase 12 — Deploy
 
 **Goal:** Live on Vercel + Render.
 
@@ -287,15 +324,17 @@ Expected score: 10 - 2.5 - 1.5 = 6.0 → CAUTION verdict
 
 | Phase | What | Status |
 |-------|------|--------|
-| 1 | MongoDB Setup | ⬜ TODO |
-| 2 | FastAPI Skeleton | ⬜ TODO |
-| 3 | Text Endpoint (No AI) | ⬜ TODO |
-| 4 | NaraRouter Text Model | ⬜ TODO |
-| 5 | Vision Model + Image Endpoint | ⬜ TODO |
+| 1 | MongoDB Setup | ✅ DONE |
+| 2 | FastAPI Skeleton | ✅ DONE |
+| 3 | Text Endpoint (No AI) | ✅ DONE |
+| 4 | NaraRouter Text Model | ✅ DONE (superseded — Groq used directly, see CLAUDE.md) |
+| 5 | Vision Model + Image Endpoint | ✅ DONE (Groq direct, see CLAUDE.md) |
 | 6 | Tavily Web Search | ✅ DONE |
 | 7 | Scoring Finalize + Tests | ✅ DONE |
 | 8 | Next.js Frontend | ✅ DONE |
-| 9 | Polish | ⬜ TODO |
-| 10 | Deploy | ⬜ TODO |
+| 9 | Search-by-Product-Name | ✅ DONE |
+| 10 | "Good Ingredients" Verification | ✅ DONE |
+| 11 | Polish | ⬜ TODO |
+| 12 | Deploy | ⬜ TODO |
 
 > Update status: ⬜ TODO → 🔄 IN PROGRESS → ✅ DONE

@@ -2,6 +2,8 @@
 
 export type SeverityLevel = "low" | "moderate" | "high" | "critical";
 
+export type VerificationStatus = "verified_safe" | "uncertain";
+
 export interface IngredientResult {
   ingredient: string;
   matched_chemical: string | null;
@@ -9,6 +11,10 @@ export interface IngredientResult {
   concerns: string[];
   is_flagged: boolean;
   research_url: string | null;
+  // Only set for non-flagged ingredients (see services/ingredient_verify.py).
+  // null means "not verified" — treat the same as "uncertain", never as safe.
+  verification_status: VerificationStatus | null;
+  verification_note: string | null;
 }
 
 export interface ScanResponse {

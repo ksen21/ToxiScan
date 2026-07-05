@@ -29,10 +29,31 @@ function CheckMark({ className = "" }: { className?: string }) {
   );
 }
 
+function QuestionMark({ className = "" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
+      <circle cx="12" cy="12" r="10" fill="currentColor" opacity="0.12" />
+      <path
+        d="M9.5 9.3a2.5 2.5 0 0 1 4.9.7c0 1.7-2.4 2-2.4 3.5M12 17h.01"
+        stroke="currentColor"
+        strokeWidth={2.1}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 export default function ResultCard({ data, onReset }: ResultCardProps) {
   const [showAll, setShowAll] = useState(false);
   const flagged = data.results.filter((r) => r.is_flagged);
-  const good = data.results.filter((r) => !r.is_flagged);
+  // Only trust "verified_safe" from an actual model classification. Anything
+  // else non-flagged — including verification_status === null, which means
+  // the verification call didn't run or failed — falls into "uncertain".
+  // We never default an unverified ingredient to "good" (see
+  // services/ingredient_verify.py for why).
+  const verifiedGood = data.results.filter((r) => !r.is_flagged && r.verification_status === "verified_safe");
+  const uncertain = data.results.filter((r) => !r.is_flagged && r.verification_status !== "verified_safe");
   const isClean = data.flagged_count === 0;
 
   return (
@@ -99,18 +120,46 @@ export default function ResultCard({ data, onReset }: ResultCardProps) {
         </div>
       )}
 
-      {/* Good ingredients — separate, positively-colored list */}
-      {good.length > 0 && (
+      {/* Verified-safe ingredients — only ones the model actually confirmed */}
+      {verifiedGood.length > 0 && (
         <div className="space-y-3 rounded-xl border border-safe/30 bg-safe-bg p-4">
           <h3 className="flex items-center gap-1.5 font-display text-sm font-semibold text-safe">
             <CheckMark className="h-4 w-4" />
-            Good ingredients ({good.length})
+            Good ingredients ({verifiedGood.length})
           </h3>
           <ul className="flex flex-wrap gap-2">
-            {good.map((r, i) => (
+            {verifiedGood.map((r, i) => (
               <li
                 key={`${r.ingredient}-${i}`}
+                title={r.verification_note || undefined}
                 className="rounded-full border border-safe/30 bg-surface px-3 py-1 text-xs font-medium text-safe"
+              >
+                {r.ingredient}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Uncertain / limited-data ingredients — not flagged as harmful, but not
+          confirmed safe either. Kept distinct from "Good" so a "no data"
+          ingredient never reads as a positive safety claim. */}
+      {uncertain.length > 0 && (
+        <div className="space-y-3 rounded-xl border border-caution/30 bg-caution-bg p-4">
+          <h3 className="flex items-center gap-1.5 font-display text-sm font-semibold text-caution">
+            <QuestionMark className="h-4 w-4" />
+            Uncertain / Limited Data ({uncertain.length})
+          </h3>
+          <p className="text-xs text-ink-muted">
+            Not found in our flagged-chemicals database, but we couldn&apos;t confirm these as
+            well-established safe either — informational only, not medical advice.
+          </p>
+          <ul className="flex flex-wrap gap-2">
+            {uncertain.map((r, i) => (
+              <li
+                key={`${r.ingredient}-${i}`}
+                title={r.verification_note || "No confident safety data available"}
+                className="rounded-full border border-caution/30 bg-surface px-3 py-1 text-xs font-medium text-caution"
               >
                 {r.ingredient}
               </li>
@@ -146,8 +195,10 @@ export default function ResultCard({ data, onReset }: ResultCardProps) {
                 <span className="text-ink-muted">{r.ingredient}</span>
                 {r.is_flagged ? (
                   <XMark className="h-4 w-4 shrink-0 text-danger" />
-                ) : (
+                ) : r.verification_status === "verified_safe" ? (
                   <CheckMark className="h-4 w-4 shrink-0 text-safe" />
+                ) : (
+                  <QuestionMark className="h-4 w-4 shrink-0 text-caution" />
                 )}
               </li>
             ))}

@@ -10,6 +10,7 @@ from services.db import get_db
 from services.scanner import scan_ingredients, calculate_safety_score, derive_display_scores
 from services.ocr import extract_ingredients_from_image
 from services.search import enrich_with_research_urls
+from services.ingredient_verify import verify_unflagged_ingredients
 from services.product_lookup import find_ingredients_by_product_name
 from models.schemas import ScanRequest, ScanResponse, ProductNameScanRequest
 
@@ -38,6 +39,7 @@ async def scan_text(
         raise HTTPException(status_code=400, detail="No ingredients could be parsed from input")
 
     results = await enrich_with_research_urls(results)
+    results = await verify_unflagged_ingredients(results)
 
     score, label = calculate_safety_score(results)
     score_out_of_10, star_rating = derive_display_scores(score)
@@ -85,6 +87,7 @@ async def scan_product_name(
         )
 
     results = await enrich_with_research_urls(results)
+    results = await verify_unflagged_ingredients(results)
 
     score, label = calculate_safety_score(results)
     score_out_of_10, star_rating = derive_display_scores(score)
@@ -145,6 +148,7 @@ async def scan_image(
         raise HTTPException(status_code=400, detail="No ingredients could be parsed from image text")
 
     results = await enrich_with_research_urls(results)
+    results = await verify_unflagged_ingredients(results)
 
     score, label = calculate_safety_score(results)
     score_out_of_10, star_rating = derive_display_scores(score)

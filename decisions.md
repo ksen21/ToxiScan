@@ -362,3 +362,59 @@ Everything below was completed and verified in today's session, backend-only (fr
 **Not yet verified live — TODO next session:**
 1. Test a well-known skincare product (e.g. "Paula's Choice Resist Advanced Smoothing Treatment 10% AHA" or "CeraVe Moisturizing Cream") via plain name only — confirm it resolves through the INCIDecoder path (check `source=curated ingredient database` in logs) and returns accurate ingredients.
 2. Test a product not on INCIDecoder (e.g. the Lakmē lipstick) — confirm it falls through cleanly to the general search path.
+
+---
+
+## Phase 9 fix — Tavily extract missing tab-content ingredients, httpx direct-fetch fallback added (2026-07-05)
+
+**Bug found by user (live-tested):** Direct-URL scan of the Lakmē lipstick page (`lakmeindia.com/products/lakme-9to5-hya-beach-edit-lipstick-liner-duo`) still returned a 422 "couldn't find ingredients" even after the Phase 9 fix (direct URL support + `include_raw_content=True`). Confirmed via manual fetch that the ingredients (`Isododecane, Trimethylsiloxysilicate, Dimethicone, Cyclopentasiloxane, Caprylic/Capric Triglyceride`) genuinely are present in the page.
+
+**Root cause (two-layered):**
+1. Naive head-truncation — `_extract_url_sync()` and the final Groq prompt both did `content[:MAX_CONTENT_CHARS]` (first 12,000 chars only). This Lakmē page has huge nav/recommendation-carousel/category-tag content; if the "Ingredients" section happened to sit later in Tavily's raw_content ordering, it was silently cut before ever reaching the LLM.
+2. Root cause underneath that — Tavily's `.extract()` is a static-HTML crawl. The Lakmē page renders "Ingredients / Information / Product Details" as JS-driven tabs; confirmed via new diagnostic logging that Tavily's returned content had **zero occurrences of the word "ingredient"** at all (`'ingredient' keyword present=False`) — Tavily never saw that section, no amount of smarter truncation would have helped.
+
+**Fixes — three changes to `services/product_lookup.py`:**
+1. **`_cap_content()` helper** — replaced blind `content[:MAX_CONTENT_CHARS]` head-truncation everywhere with a keyword-windowed cap: finds the first "ingredient" occurrence and keeps a window around it (6,000 chars each side), only falling back to plain head-truncation if the keyword never appears at all. Fixes truncation-order bugs on any large page, independent of the Tavily-specific issue below.
+2. **Diagnostic logging** — logs raw content length + whether the "ingredient" keyword is present, right after Tavily extract, so future failures are diagnosable from logs alone instead of guessing.
+3. **`_direct_fetch_sync()` fallback** — when Tavily's extracted content has no "ingredient" keyword at all, do a second, independent plain `httpx.get()` on the same URL (custom User-Agent, 10s timeout, stdlib `HTMLParser` strips `<script>/<style>` and grabs visible text) and use that instead if *it* contains the keyword. No new dependency — `httpx` was already in `requirements.txt`.
+
+**Why this worked:** the Lakmē tab content turned out to be present in the plain server-rendered HTML (a normal GET picked it up fine) — Tavily's own crawler/extractor just handles that particular markup differently. No headless-browser/JS execution was needed here; a second static fetch was enough.
+
+**Live-verified by user (2026-07-05):** Same Lakmē URL now goes: `Tavily extract → 12000 chars, keyword present=False` → `Direct fetch fallback succeeded (12000 chars)` → Groq extracts 99 chars → **6 ingredients, 1 flagged, score=78, 200 OK.** Full pipeline confirmed end-to-end.
+
+**Known limitation / not yet hit:** if a page's ingredients are *only* rendered client-side via JS (not present in the server's raw HTML response at all, e.g. fully client-fetched via a separate AJAX call after page load), neither Tavily's extract nor this httpx fallback will find it — that would need a headless-browser fetch (Playwright/Selenium), which is a heavier dependency intentionally not added yet. Revisit if this shows up in practice.
+
+---
+
+## Phase 10 — "Good ingredients" verification (2026-07-05)
+
+**Problem raised by user:** an ingredient was being labeled "Good" purely because it didn't match anything in our curated ~67-chemical harmful-chemicals DB. That's a "not flagged" claim, not a "verified safe" claim — our DB only covers a curated known-harmful list, so an unmatched ingredient could just as easily be something the DB never had an opinion on, not something genuinely confirmed safe. User wanted real verification behind the "Good" label — via AI's trained knowledge and/or research — before an ingredient earns that badge.
+
+**Decision — scope of verification (user's explicit choice):**
+- Trained-knowledge only, via Groq, **no Tavily/web search** for this feature. One fast batched call over the whole non-flagged list per scan, not N calls and not a slower research pass.
+- Alternative considered: LLM + Tavily research per ingredient — rejected by user for latency/cost; can revisit later if accuracy issues surface.
+
+**Decision — how to display uncertain ingredients (user's explicit choice):**
+- A distinct third section, **"Uncertain / Limited Data"**, separate from both "Flagged" and "Good" — rather than folding uncertain ones into "Good" with a footnote. Keeps the positive "Good" label meaning something specific (model actually confirmed it), rather than being a dumping ground for "no data either way."
+
+**What was built:**
+- `backend/services/ingredient_verify.py` (new) — `verify_unflagged_ingredients()`: for ingredients where `is_flagged == False`, sends ONE batched Groq (`llama-3.3-70b-versatile`) call asking the model to classify each as `"verified_safe"` (only when genuinely confident, per cosmetic-science/regulatory consensus — FDA/EU CosIng/CIR-style reasoning) or `"uncertain"` (limited/mixed data, unrecognized ingredient, or any real reason for caution) — plus a short plain-language note per ingredient. Prompt explicitly instructs the model to default to `"uncertain"` whenever not confident — deliberately conservative, since overclaiming safety is worse than under-claiming it.
+  - Capped at `MAX_INGREDIENTS_PER_CALL = 60` ingredients per call to keep prompt/response size bounded; any excess ingredients beyond that are simply left unverified (→ treated as uncertain downstream, never silently marked good).
+  - **Does NOT touch `safety_score`** — this is purely an informational/display classification, wired in *after* scoring-relevant matching but kept fully separate from `calculate_safety_score()`. Consistent with project_rule.md: "Safety scoring NEVER done by AI."
+  - Fails closed: any Groq error or JSON-parse failure leaves `verification_status = None` for all ingredients in that batch rather than crashing or guessing — and `None` is treated identically to `"uncertain"` downstream (see schema note below), so a failed verification call can never misrepresent an ingredient as safe.
+- `backend/models/schemas.py` — added `verification_status: Optional[str]` (`"verified_safe" | "uncertain" | None`) and `verification_note: Optional[str]` to `IngredientResult`. Comment explicitly notes `None` must be treated as uncertain, not safe, by any consumer.
+- `backend/routers/scan.py` — wired `verify_unflagged_ingredients()` into all three endpoints (`/scan/text`, `/scan/product-name`, `/scan/image`), immediately after `enrich_with_research_urls()` and before `calculate_safety_score()` (call order doesn't matter for scoring since verification never feeds into it — placed here just to mirror the existing enrichment step's pattern).
+- `frontend/lib/types.ts` — added `VerificationStatus` type and the two new fields to `IngredientResult`.
+- `frontend/components/ResultCard.tsx`:
+  - "Good ingredients" section now filters to `verification_status === "verified_safe"` only (previously: anything simply not flagged).
+  - New "Uncertain / Limited Data" section (uses the existing `caution` design token — amber, already in `tailwind.config.ts`, no new color needed) for everything non-flagged that isn't `verified_safe` — includes ingredients with `verification_status === "uncertain"` AND `null` (unverified), plus a one-line disclaimer ("informational only, not medical advice", consistent with project_rule.md forbidden #9).
+  - Added `QuestionMark` icon component; the collapsible "All ingredients" list now shows three icon states (red X flagged / green check verified-safe / amber question-mark uncertain) instead of two.
+  - Each ingredient chip shows its `verification_note` as a hover tooltip (`title` attribute).
+
+**Cost/latency tradeoff (surfaced, not yet resolved):** this adds one extra Groq call to every scan. For products with large ingredient lists (40–60+), this could noticeably add to response time against the SPEC.md targets (<10s image / <5s text). Not batched/cached across scans of the same product. **Revisit if this proves too slow in practice** — options would be caching verification results by ingredient name (most cosmetic ingredients are shared across many products) or running it in parallel with `enrich_with_research_urls()` rather than sequentially.
+
+**Not yet verified live — TODO next session:**
+1. Real `/scan/text` or `/scan/product-name` call with `GROQ_API_KEY` set — confirm the batched classification call returns valid JSON and plausible verdicts (e.g. Water/Glycerin → verified_safe; an obscure/rare ingredient name → uncertain).
+2. Confirm case-insensitive name matching in `verify_unflagged_ingredients()` correctly re-attaches results even if the model normalizes casing/whitespace differently than the input list.
+3. Time a scan with a large ingredient count (40+) to see the actual latency impact of the added Groq call.
+4. Manually verify the "Uncertain / Limited Data" section renders correctly and the tooltip note shows on hover in a real browser (sandbox has no npm/network to run a real Next.js build — only bracket-balance-checked here, same limitation as Phase 8/9).

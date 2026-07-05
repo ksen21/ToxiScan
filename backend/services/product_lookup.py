@@ -44,7 +44,32 @@ logger = logging.getLogger(__name__)
 
 MAX_SEARCH_RESULTS = 4
 MAX_CONTENT_CHARS = 12000  # per-source cap before handing to the LLM
+INGREDIENT_WINDOW_CHARS = 6000  # chars kept before/after an "ingredient" keyword hit
 TEXT_MODEL = "llama-3.3-70b-versatile"
+
+# Large e-commerce pages (nav menus, "similar products" carousels, cookie/
+# privacy notices, giant category-tag footers) can easily push the real
+# ingredients section past a naive head-truncation cutoff. Instead of
+# blindly keeping the first MAX_CONTENT_CHARS, look for a keyword that
+# usually precedes an ingredients list and keep a window around the FIRST
+# hit — falls back to head truncation if no such keyword is found at all.
+_INGREDIENT_KEYWORD_RE = re.compile(r"ingredient", re.IGNORECASE)
+
+
+def _cap_content(content: str, limit: int = MAX_CONTENT_CHARS) -> str:
+    """Keep the most relevant slice of `content` within `limit` chars."""
+    if len(content) <= limit:
+        return content
+    match = _INGREDIENT_KEYWORD_RE.search(content)
+    if not match:
+        # No keyword hit anywhere — nothing smarter to do than head-truncate.
+        return content[:limit]
+    center = match.start()
+    half = min(INGREDIENT_WINDOW_CHARS, limit // 2)
+    start = max(0, center - half)
+    end = min(len(content), start + limit)
+    start = max(0, end - limit)  # re-clamp in case we hit the end of the string
+    return content[start:end]
 
 # Curated ingredient databases to check first for plain product-name input —
 # these list ingredients plainly with far less noise than brand/retailer
@@ -101,9 +126,58 @@ def _extract_url_sync(url: str) -> str:
                 logger.warning(f"Tavily extract failed for '{url}': {failed}")
             return ""
         content = results[0].get("raw_content", "") or ""
-        return content[:MAX_CONTENT_CHARS]
+        return _cap_content(content)
     except Exception as e:
         logger.warning(f"Tavily extract failed for '{url}': {e}")
+        return ""
+
+
+def _direct_fetch_sync(url: str) -> str:
+    """
+    Plain HTTP GET + HTML-to-text fallback for when Tavily's extract() comes
+    back without an "ingredient" keyword anywhere — usually means Tavily's
+    static-HTML crawl missed content that's actually present in the raw
+    server response (e.g. a tab panel that's in the HTML but visually
+    hidden/toggled by JS, which some crawlers strip differently than others).
+    Best-effort only: no JS execution here either, just a second, independent
+    read of the same URL. Returns "" on any failure.
+    """
+    try:
+        import httpx
+        from html.parser import HTMLParser
+
+        class _TextExtractor(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.chunks: list[str] = []
+                self._skip = False
+
+            def handle_starttag(self, tag, attrs):
+                if tag in ("script", "style", "noscript"):
+                    self._skip = True
+
+            def handle_endtag(self, tag):
+                if tag in ("script", "style", "noscript"):
+                    self._skip = False
+
+            def handle_data(self, data):
+                if not self._skip:
+                    stripped = data.strip()
+                    if stripped:
+                        self.chunks.append(stripped)
+
+        resp = httpx.get(
+            url,
+            timeout=10.0,
+            follow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; ToxiScanBot/1.0)"},
+        )
+        resp.raise_for_status()
+        parser = _TextExtractor()
+        parser.feed(resp.text)
+        return _cap_content(" ".join(parser.chunks), limit=MAX_CONTENT_CHARS)
+    except Exception as e:
+        logger.warning(f"Direct fetch fallback failed for '{url}': {e}")
         return ""
 
 
@@ -135,7 +209,7 @@ def _search_preferred_domains_sync(product_name: str) -> str:
             title = r.get("title", "")
             content = r.get("raw_content") or r.get("content", "")
             if content:
-                chunks.append(f"Source: {title}\n{content[:MAX_CONTENT_CHARS]}")
+                chunks.append(f"Source: {title}\n{_cap_content(content)}")
         return "\n\n".join(chunks)
     except Exception as e:
         logger.warning(f"Tavily preferred-domain search failed for '{product_name}': {e}")
@@ -166,7 +240,7 @@ def _search_sync(product_name: str) -> str:
             # if raw_content wasn't available for that particular result.
             content = r.get("raw_content") or r.get("content", "")
             if content:
-                chunks.append(f"Source: {title}\n{content[:MAX_CONTENT_CHARS]}")
+                chunks.append(f"Source: {title}\n{_cap_content(content)}")
         return "\n\n".join(chunks)
     except Exception as e:
         logger.warning(f"Tavily product search failed for '{product_name}': {e}")
@@ -200,6 +274,22 @@ async def find_ingredients_by_product_name(product_name_or_url: str) -> str:
                 "Couldn't read that product page right now. "
                 "Try pasting the ingredients list or uploading a label photo instead."
             )
+        logger.info(
+            f"Tavily extract for '{query}': {len(web_content)} chars, "
+            f"'ingredient' keyword present={bool(_INGREDIENT_KEYWORD_RE.search(web_content))}"
+        )
+        if not _INGREDIENT_KEYWORD_RE.search(web_content):
+            # Tavily's extractor is static-HTML based — some storefronts load
+            # tab content (Ingredients/Info/Details) via client-side JS after
+            # page load, which Tavily's extract() never sees. Fall back to a
+            # direct HTTP fetch of the same URL as a second attempt before
+            # giving up — a plain requests/httpx GET sometimes picks up
+            # server-rendered content that differs from what Tavily crawled.
+            direct = await asyncio.to_thread(_direct_fetch_sync, query)
+            if direct and _INGREDIENT_KEYWORD_RE.search(direct):
+                logger.info(f"Direct fetch fallback succeeded for '{query}' ({len(direct)} chars).")
+                web_content = direct
+                source_note = "direct URL (httpx fallback)"
     else:
         web_content = await asyncio.to_thread(_search_preferred_domains_sync, query)
         source_note = "curated ingredient database"
@@ -220,7 +310,7 @@ async def find_ingredients_by_product_name(product_name_or_url: str) -> str:
                 "content": (
                     f"{EXTRACTION_PROMPT}\n\n"
                     f"Product: {query}\n\n"
-                    f"Web content:\n{web_content[:MAX_CONTENT_CHARS]}"
+                    f"Web content:\n{_cap_content(web_content)}"
                 ),
             }
         ],

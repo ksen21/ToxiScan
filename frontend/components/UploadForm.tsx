@@ -18,7 +18,7 @@ export default function UploadForm({
   onSubmitProductName,
   disabled,
 }: UploadFormProps) {
-  const [mode, setMode] = useState<"text" | "image" | "name">("text");
+  const [mode, setMode] = useState<"text" | "image" | "name">("name");
   const [productName, setProductName] = useState("");
   const [ingredientsText, setIngredientsText] = useState("");
   const [file, setFile] = useState<File | null>(null);
@@ -65,7 +65,7 @@ export default function UploadForm({
   return (
     <form onSubmit={handleSubmit} className="space-y-5">
       <div className="flex gap-1 rounded-lg border border-line bg-surface p-1">
-        {(["text", "image", "name"] as const).map((m) => (
+        {(["name", "image", "text"] as const).map((m) => (
           <button
             key={m}
             type="button"
