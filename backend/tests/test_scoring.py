@@ -12,12 +12,13 @@ Thresholds under test: >=85 Safe, >=60 Moderate, >=35 Risky, else Dangerous.
 """
 
 import pytest
+from typing import Optional
 
 from services.scanner import calculate_safety_score, derive_display_scores, score_to_label
 from models.schemas import IngredientResult, SeverityLevel
 
 
-def make_result(is_flagged: bool = False, severity: SeverityLevel = None) -> IngredientResult:
+def make_result(is_flagged: bool = False, severity: Optional[SeverityLevel] = None) -> IngredientResult:
     """Small helper — builds a minimal IngredientResult for scoring tests."""
     return IngredientResult(
         ingredient="test-ingredient",

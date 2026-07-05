@@ -57,7 +57,7 @@ class ScanRequest(BaseModel):
         ...,
         min_length=3,
         description="Raw ingredient list pasted from a product label",
-        example="Water, Sodium Lauryl Sulfate, Parabens, Fragrance"
+        json_schema_extra={"example": "Water, Sodium Lauryl Sulfate, Parabens, Fragrance"},
     )
     product_name: Optional[str] = None
 
@@ -68,7 +68,7 @@ class ProductNameScanRequest(BaseModel):
         ...,
         min_length=2,
         description="Product name to search the web for, e.g. 'CeraVe Moisturizing Cream'",
-        example="Lakme 9to5 Hya Beach Edit Lipstick"
+        json_schema_extra={"example": "Lakme 9to5 Hya Beach Edit Lipstick"},
     )
 
 

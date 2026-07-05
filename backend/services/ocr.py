@@ -50,7 +50,7 @@ async def extract_ingredients_from_image(image_bytes: bytes, content_type: str) 
         max_tokens=1024,
     )
 
-    text = response.choices[0].message.content.strip()
+    text = (response.choices[0].message.content or "").strip()
 
     if not text or text == "NO_INGREDIENTS_FOUND":
         raise ValueError("No ingredients list could be detected in the image.")

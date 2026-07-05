@@ -4,6 +4,8 @@ Provides a single shared client with connection pooling.
 """
 
 import logging
+from typing import Optional
+
 import certifi
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from services.config import settings
@@ -11,8 +13,8 @@ from services.config import settings
 logger = logging.getLogger(__name__)
 
 class Database:
-    client: AsyncIOMotorClient = None
-    db: AsyncIOMotorDatabase = None
+    client: Optional[AsyncIOMotorClient] = None
+    db: Optional[AsyncIOMotorDatabase] = None
 
 db_instance = Database()
 
@@ -43,4 +45,5 @@ async def close_db():
 
 def get_db() -> AsyncIOMotorDatabase:
     """Dependency injector — returns the active database instance."""
+    assert db_instance.db is not None, "get_db() called before connect_db() ran on startup"
     return db_instance.db

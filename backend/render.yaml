@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: toxiscan-backend
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: MONGODB_URI
+        sync: false # set manually in dashboard — secret, not committed
+      - key: GROQ_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: APP_ENV
+        value: production
+      - key: ALLOWED_ORIGINS
+        sync: false # set to your Vercel URL after the frontend is deployed

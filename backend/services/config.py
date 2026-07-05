@@ -30,4 +30,8 @@ class Settings(BaseSettings):
         env_file_encoding = "utf-8"
 
 
-settings = Settings()
+# mypy sees this as a missing required argument since MONGODB_URI has no
+# default — but pydantic-settings populates it from the environment/.env
+# file at runtime, which mypy has no way to verify statically. Known,
+# expected false positive for BaseSettings subclasses.
+settings = Settings()  # type: ignore[call-arg]
