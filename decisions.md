@@ -413,8 +413,39 @@ Everything below was completed and verified in today's session, backend-only (fr
 
 **Cost/latency tradeoff (surfaced, not yet resolved):** this adds one extra Groq call to every scan. For products with large ingredient lists (40–60+), this could noticeably add to response time against the SPEC.md targets (<10s image / <5s text). Not batched/cached across scans of the same product. **Revisit if this proves too slow in practice** — options would be caching verification results by ingredient name (most cosmetic ingredients are shared across many products) or running it in parallel with `enrich_with_research_urls()` rather than sequentially.
 
-**Not yet verified live — TODO next session:**
-1. Real `/scan/text` or `/scan/product-name` call with `GROQ_API_KEY` set — confirm the batched classification call returns valid JSON and plausible verdicts (e.g. Water/Glycerin → verified_safe; an obscure/rare ingredient name → uncertain).
-2. Confirm case-insensitive name matching in `verify_unflagged_ingredients()` correctly re-attaches results even if the model normalizes casing/whitespace differently than the input list.
-3. Time a scan with a large ingredient count (40+) to see the actual latency impact of the added Groq call.
-4. Manually verify the "Uncertain / Limited Data" section renders correctly and the tooltip note shows on hover in a real browser (sandbox has no npm/network to run a real Next.js build — only bracket-balance-checked here, same limitation as Phase 8/9).
+**Live-verified (2026-07-05, user's local machine):**
+1. ✅ Real `/scan/*` flow test via standalone `test_verify_live.py` (48 ingredients, real `GROQ_API_KEY`, `llama-3.3-70b-versatile`): all 14 well-established cosmetic ingredients (Water, Glycerin, Titanium Dioxide, Niacinamide, Squalane, Sodium Hyaluronate, Panthenol, Tocopherol, Xanthan Gum, Caprylic/Capric Triglyceride, Cetearyl Alcohol, Phenoxyethanol, Rosa Multiflora Fruit Extract, Disteardimonium Hectorite) correctly classified `verified_safe` with accurate plain-language notes (e.g. "Sunscreen pigment" for Titanium Dioxide, "Hyaluronic acid" for Sodium Hyaluronate). Both intentionally-fake ingredients ("Some Totally Made Up Extract 12345", "Zzyzx-Compound-9") correctly classified `uncertain` ("Unknown ingredient" / "Unrecognized chemical") — model did not hallucinate a safe verdict for unrecognized names. Result: 42 verified_safe / 6 uncertain out of 48.
+2. ✅ Case-insensitive name matching confirmed via a mocked-Groq unit test (`GLYCERIN` ↔ `glycerin`, `"  water  "` ↔ `"Water"`, markdown-fence-wrapped JSON response) — all matched correctly.
+3. ✅ Latency: **1.26s for 48 ingredients in one batched call** — comfortably inside the SPEC.md <5s (text) / <10s (image) targets. No caching/parallelization needed at this scale.
+4. ⬜ Still pending: real-browser check of the "Uncertain / Limited Data" section rendering + tooltip (needs `npm run dev`, not runnable in this sandbox — no npm/network access here).
+
+Also verified separately: failure-path degrades safely — a mocked Groq API exception leaves every ingredient's `verification_status = None` with no crash and nothing wrongly marked safe.
+
+---
+
+## Phase 11 — Polish (2026-07-05)
+
+Audited all Phase 11 tasks against the actual codebase before doing new work — most were already done in earlier phases:
+- Empty state, research-URL-new-tab, collapsible ingredient list, product-name-at-top, file type/size validation — all already present, no changes needed. (8MB image cap deliberately kept as-is — matches backend's `MAX_IMAGE_SIZE_MB`; SPEC.md's "10MB" is the stale doc, per CLAUDE.md's source-of-truth rule.)
+- **Added:** `frontend/app/error.tsx` — Next.js App Router error boundary for the page tree (catches React render-time crashes, a different failure mode from the try/catch in `page.tsx`, which only catches API-call rejections). Deliberately never renders raw `error.message`/stack (project_rule.md: never expose backend/internal errors) — generic friendly message + retry button only.
+- **Added:** `frontend/app/global-error.tsx` — root-layout-crash fallback (rare case; Next.js requires this file render its own `<html>/<body>` since the layout that would normally provide them is what crashed). Kept intentionally plain/inline-styled, no dependency on design tokens or fonts, since if the layout broke we can't assume anything above this component still works.
+
+**`npm run lint` — fixed a broken ESLint setup (live-debugged with user):**
+- Root cause: `frontend/package.json` had never had `eslint`/`eslint-config-next` added as devDependencies. Running `next lint` for the first time (no existing `.eslintrc`) triggers its interactive auto-installer, which tried to install `eslint@^8` AND latest `eslint-config-next@16.2.10` simultaneously — but `eslint-config-next@16.2.10` requires `eslint@>=9.0.0`, causing an `ERESOLVE` dependency conflict and total failure before lint could even run.
+- Fix: manually pinned `"eslint": "^8.57.0"` and `"eslint-config-next": "14.2.18"` (exact match to the installed `next` version) in `package.json`, and added `.eslintrc.json` (`{"extends": "next/core-web-vitals"}`) so the interactive installer never triggers again.
+- **Live-verified by user: `npm run lint` → zero errors.**
+
+**`mypy . --ignore-missing-imports` — 7 real issues found across 5 files, all fixed:**
+- `models/schemas.py` (×2): `Field(example=...)` — Pydantic v1 syntax, invalid under Pydantic v2 → moved to `json_schema_extra={"example": ...}`.
+- `services/config.py`: `Settings()` flagged as missing the required `MONGODB_URI` argument — an expected false positive for `pydantic-settings` `BaseSettings` subclasses (the value is populated from `.env` at runtime, which mypy can't verify statically) → targeted `# type: ignore[call-arg]` with an explanatory comment, not a blanket ignore.
+- `services/ocr.py`: **genuine bug, not just a type nitpick** — `response.choices[0].message.content.strip()` would crash with `AttributeError` if Groq ever returned `content: None` (e.g. a content-filtered/refused response) → fixed to `(response.choices[0].message.content or "").strip()`.
+- `services/db.py` (×2): `Database.client`/`Database.db` class attributes default to `None` but were typed as non-Optional (`AsyncIOMotorClient`/`AsyncIOMotorDatabase`) → retyped as `Optional[...]`. `get_db()` now has an `assert db_instance.db is not None` guard — turns "called before `connect_db()` ran on startup" from a silent `None`-return bug into an immediate, clear `AssertionError`.
+- `tests/test_scoring.py`: `severity: SeverityLevel = None` in a test helper — implicit-Optional, invalid under PEP 484 (mypy's own note pointed at this) → `Optional[SeverityLevel] = None`.
+- (One non-error `note` also appeared for `product_lookup.py:152` — "annotation-unchecked" for an untyped def; informational only, not a failure, left as-is.)
+
+**Done criteria — all met:**
+- `npm run lint` → zero errors (confirmed by user)
+- `mypy` clean, including one real fixed crash risk (`ocr.py`)
+- All 5 async states (idle/loading/success/error + now render-crash via error boundary) handled
+
+**Phase 11 marked complete in build_plan.md.** Not yet done: a real-browser pass to visually confirm the two new error-boundary pages look right (same sandbox limitation as everywhere else — no npm/network here).

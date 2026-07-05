@@ -24,6 +24,15 @@ export const metadata: Metadata = {
   title: "ToxiScan — Know what's really in it",
   description:
     "Paste an ingredients list or photograph a label to get an instant safety reading on the chemicals inside.",
+  icons: {
+    icon: [
+      { url: "/favicon.ico" },
+      { url: "/favicon-16x16.png", sizes: "16x16", type: "image/png" },
+      { url: "/favicon-32x32.png", sizes: "32x32", type: "image/png" },
+    ],
+    apple: [{ url: "/apple-touch-icon.png" }],
+  },
+  manifest: "/site.webmanifest",
 };
 
 export default function RootLayout({
