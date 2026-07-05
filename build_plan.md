@@ -221,7 +221,26 @@ Expected score: 10 - 2.5 - 1.5 = 6.0 → CAUTION verdict
 
 ---
 
-## Phase 9 — Polish
+## Phase 9 — Search-by-Product-Name (Completed: 2026-07-05)
+
+**Goal:** Let a user scan a product using just its name — no ingredients text, no photo.
+
+**Tasks:**
+- `backend/services/product_lookup.py` — Tavily web search + Groq text-model extraction to turn a product name into an ingredients string
+- New `POST /scan/product-name` endpoint, reusing the existing `scan_ingredients()` scoring pipeline
+- `ProductNameScanRequest` schema
+- Frontend: third "Search by name" tab in `UploadForm.tsx`, wired in `page.tsx`
+
+**Done criteria:**
+- Product name alone can trigger a full scan end-to-end
+- Clean 422 error (not a crash) when no ingredients list can be found online
+- Text/image modes unaffected — each mode still only requires its own field
+
+*(Added after the original Phase 8 plan, in response to user-reported gap: entering only a product name in "Paste ingredients" mode left the Scan button disabled with no alternative path.)*
+
+---
+
+## Phase 10 — Polish
 
 **Goal:** Edge cases, UX improvements, error handling.
 
@@ -242,7 +261,7 @@ Expected score: 10 - 2.5 - 1.5 = 6.0 → CAUTION verdict
 
 ---
 
-## Phase 10 — Deploy
+## Phase 11 — Deploy
 
 **Goal:** Live on Vercel + Render.
 

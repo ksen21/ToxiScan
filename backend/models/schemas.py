@@ -62,6 +62,16 @@ class ScanRequest(BaseModel):
     product_name: Optional[str] = None
 
 
+class ProductNameScanRequest(BaseModel):
+    """Search-by-product-name scan request — no ingredients text needed."""
+    product_name: str = Field(
+        ...,
+        min_length=2,
+        description="Product name to search the web for, e.g. 'CeraVe Moisturizing Cream'",
+        example="Lakme 9to5 Hya Beach Edit Lipstick"
+    )
+
+
 class IngredientResult(BaseModel):
     ingredient: str
     matched_chemical: Optional[str] = None   # name from DB

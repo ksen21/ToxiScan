@@ -30,6 +30,19 @@ export async function scanText(
   return res.json();
 }
 
+export async function scanByProductName(productName: string): Promise<ScanResponse> {
+  const res = await fetch(`${API_URL}/scan/product-name`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ product_name: productName }),
+  });
+
+  if (!res.ok) {
+    throw new Error(await parseErrorDetail(res));
+  }
+  return res.json();
+}
+
 export async function scanImage(
   file: File,
   productName?: string

@@ -298,3 +298,67 @@ Everything below was completed and verified in today's session, backend-only (fr
 2. Copy `.env.local.example` → `.env.local`, set `NEXT_PUBLIC_API_URL=http://localhost:8000`, confirm end-to-end flow against the real running backend (text scan, image scan, error states, the >5s cold-start banner).
 3. Resize browser to 375px and confirm nothing overflows/clips.
 4. Confirm no API keys appear in Network tab / page source (there shouldn't be any — frontend never touches `GROQ_API_KEY`/`TAVILY_API_KEY`, only calls own backend).
+
+---
+
+## Phase 9 — Search-by-product-name (Completed: 2026-07-05)
+
+**Why:** User flagged that in "Paste ingredients" mode, typing only a product name (no ingredients text) left the Scan button disabled — there was no way to scan based on product name alone. Confirmed this was a missing feature, not a bug: image mode and text mode were already independent (`canSubmit` in `UploadForm.tsx` only checked the field for the active mode).
+
+**What was built:**
+- `backend/services/product_lookup.py` (new) — `find_ingredients_by_product_name(product_name)`: Tavily search (`"<product name> ingredients list INCI"`, `max_results=4`, `search_depth="advanced"`) to gather web content, then a Groq text model (`llama-3.3-70b-versatile`) extracts ONLY the comma-separated ingredients list from that noisy content — same "extract, don't narrate" contract as `ocr.py`'s image prompt, with a `NO_INGREDIENTS_FOUND` sentinel. Raises `ValueError` with a user-facing message (suggesting manual paste/photo as fallback) when Tavily isn't configured, search returns nothing, or the LLM can't find a real ingredients list.
+- `backend/routers/scan.py` — new `POST /scan/product-name` endpoint: looks up ingredients via `find_ingredients_by_product_name()`, then runs the exact same `scan_ingredients()` → `enrich_with_research_urls()` → `calculate_safety_score()` → `derive_display_scores()` pipeline as `/scan/text`. `ValueError` → 422, unexpected errors → 502.
+- `backend/models/schemas.py` — new `ProductNameScanRequest` (just `product_name: str`, `min_length=2`).
+- `frontend/lib/api.ts` — new `scanByProductName(productName)`.
+- `frontend/components/UploadForm.tsx` — third tab "Search by name" alongside "Paste ingredients" / "Upload a photo". In this mode the single product-name field is *required* (min 2 chars) and becomes the only input shown — no ingredients textarea, no image upload. Submit button label changes to "Search & scan" in this mode.
+- `frontend/app/page.tsx` — new `handleSubmitProductName()` wired the same way as the text/image handlers (same loading/error/cold-start state machine).
+
+**Design notes:**
+- Deliberately reused the existing `scan_ingredients()` pipeline rather than writing a parallel scoring path — product-name search is just a third *way of getting ingredients text*, everything downstream (matching, scoring, Tavily research-url enrichment) is identical to text/image scans.
+- No new dependencies — `tavily-python` and `groq` were already in `requirements.txt` from Phases 3 and 6.
+- No caching of search results — every product-name scan does a fresh Tavily + Groq call. Acceptable for v1 given Tavily's free tier and this feature's expected lower usage vs. per-ingredient research_url lookups; revisit if usage grows.
+
+**Not yet verified live — TODO next session:**
+1. Real `POST /scan/product-name` call with `TAVILY_API_KEY` + `GROQ_API_KEY` set, against a well-known product (e.g. "CeraVe Moisturizing Cream") — confirm Tavily finds sensible pages and the Groq extraction returns a plausible ingredients string, not `NO_INGREDIENTS_FOUND` or garbage.
+2. Test a product name likely to have no findable ingredients list online (e.g. very obscure/local brand) — confirm the 422 message surfaces cleanly in the frontend error state, not a raw 500.
+3. `cd frontend && npm run build` — confirm the new mode/props compile with real `tsc`, not just bracket-balance checks (same sandbox network limitation as Phase 8).
+4. Manually click through all three tabs in a real browser to confirm the right single field is required per mode and the button never stays wrongly disabled/enabled.
+
+---
+
+## Phase 9 fix — snippet-only search was missing real ingredients (2026-07-05)
+
+**Bug found by user:** Live-tested `/scan/product-name` with "Lakmē 9to5 Hya Beach Edit Lipstick + Liner Duo" → got a 422 "couldn't find ingredients" even though the user confirmed the ingredients ARE listed on the official product page (`lakmeindia.com`). User pointed out they could paste that exact URL and the ingredients were right there.
+
+**Root cause:** `_search_sync()` called Tavily with `include_raw_content=False`, so each search result only returned a short relevance snippet, not the full page. The Lakmē product page is huge (hundreds of other products, cookie/privacy notices, etc. all on one page) — the short snippet Tavily picked for relevance didn't happen to include the "Ingredients" section, even though it exists further down the same page. Confirmed by directly fetching the URL: the ingredients (`Isododecane, Trimethylsiloxysilicate, Dimethicone, Cyclopentasiloxane, Caprylic/Capric Triglyceride`) are present in the full page HTML.
+
+**Fix — two changes to `services/product_lookup.py`:**
+1. **Direct URL support:** `find_ingredients_by_product_name()` now detects if the input is a URL (`^https?://`). If so, it skips search entirely and calls Tavily's `extract()` API on that exact URL — pulls the FULL raw page content, not a snippet. This is the reliable path when the user already knows the product page.
+2. **Better search fallback:** for plain product-name input (no URL), `_search_sync()` now sets `include_raw_content=True` on the Tavily search call, so each of the top results returns full page content instead of a short snippet — much less likely to miss a deeply-buried ingredients section.
+3. Raised the per-source content cap from 8,000 → 12,000 chars before handing to the Groq extraction call, since full-page content is naturally longer than snippets.
+4. `UploadForm.tsx` — "Search by name" tab now explicitly invites pasting a product page link ("for the most reliable result"), not just a product name, and the field/placeholder text updated accordingly.
+
+**Not yet verified live — TODO next session:**
+1. Re-run the same Lakmē product — both as a plain name (via improved search) and as the direct URL (via new extract path) — confirm both now return the real ingredients instead of a 422.
+2. Confirm `tavily-python`'s installed version actually exposes `.extract()` — if the pinned version predates that method, this will need a version bump in `requirements.txt`.
+3. Test a product name with no direct URL given, to confirm the improved `include_raw_content=True` search path alone is enough for well-known international products (e.g. CeraVe) where the exact page isn't in hand.4. **Version bump (fixed pre-emptively):** `tavily-python==0.5.0` → `tavily-python>=0.5.1` in `requirements.txt`. `.extract()` isn't reliably present on 0.5.0 — some users hit `AttributeError: 'TavilyClient' object has no attribute 'extract'` on older versions per Tavily's own community forum. 0.5.1 is the earliest version whose PyPI release notes confirm `.extract()` support.
+
+---
+
+## Phase 9 improvement — INCIDecoder as a priority source (2026-07-05)
+
+**User suggestion:** incidecoder.com reliably has skincare product ingredients most of the time.
+
+**Verified:** Fetched a sample INCIDecoder product page directly — ingredients are listed cleanly and plainly (even right in the page's meta description, e.g. "...ingredients explained: Water (Aqua), Butylene Glycol, Glycolic Acid, ..."), with zero marketing noise. Much more reliable than a generic brand/retailer page for skincare specifically.
+
+**Change to `services/product_lookup.py`:**
+- New `PREFERRED_INGREDIENT_DOMAINS = ["incidecoder.com"]` constant (list, so more curated databases can be added later without touching the logic).
+- New `_search_preferred_domains_sync()` — Tavily search scoped to just those domains via `include_domains`, with `include_raw_content=True`, `max_results=2`.
+- `find_ingredients_by_product_name()` search order for plain product-name input (no direct URL) is now: **(1) INCIDecoder-scoped search → (2) general web search fallback** if INCIDecoder has no match. Direct-URL input (from the earlier fix) is unaffected — it always goes straight to `_extract_url_sync()`.
+- Added `source_note` to the final log line so it's visible in logs which tier actually answered a given request (`curated ingredient database` vs `general web search` vs `direct URL`) — useful for judging hit-rate later.
+
+**Design note:** Scoped to skincare/cosmetic ingredient databases only for now — INCIDecoder doesn't cover makeup shade-specific products like the Lakmē lipstick as well as it covers skincare, so the general-web fallback still matters and isn't being removed.
+
+**Not yet verified live — TODO next session:**
+1. Test a well-known skincare product (e.g. "Paula's Choice Resist Advanced Smoothing Treatment 10% AHA" or "CeraVe Moisturizing Cream") via plain name only — confirm it resolves through the INCIDecoder path (check `source=curated ingredient database` in logs) and returns accurate ingredients.
+2. Test a product not on INCIDecoder (e.g. the Lakmē lipstick) — confirm it falls through cleanly to the general search path.

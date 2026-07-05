@@ -5,7 +5,7 @@ import UploadForm from "@/components/UploadForm";
 import ResultCard from "@/components/ResultCard";
 import Header from "@/components/Header";
 import { ResultSkeleton } from "@/components/Skeletons";
-import { scanText, scanImage } from "@/lib/api";
+import { scanText, scanImage, scanByProductName } from "@/lib/api";
 import { ScanResponse } from "@/lib/types";
 
 type Status = "idle" | "loading" | "success" | "error";
@@ -58,6 +58,20 @@ export default function Home() {
     }
   }
 
+  async function handleSubmitProductName(productName: string) {
+    beginRequest();
+    try {
+      const result = await scanByProductName(productName);
+      setData(result);
+      setStatus("success");
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : "Something went wrong. Please try again.");
+      setStatus("error");
+    } finally {
+      endRequest();
+    }
+  }
+
   function reset() {
     setStatus("idle");
     setData(null);
@@ -80,7 +94,11 @@ export default function Home() {
 
         <div className="rounded-2xl border border-line bg-surface p-5 shadow-sm sm:p-7">
           {status === "idle" && (
-            <UploadForm onSubmitText={handleSubmitText} onSubmitImage={handleSubmitImage} />
+            <UploadForm
+              onSubmitText={handleSubmitText}
+              onSubmitImage={handleSubmitImage}
+              onSubmitProductName={handleSubmitProductName}
+            />
           )}
 
           {status === "loading" && (

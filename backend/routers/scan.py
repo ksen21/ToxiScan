@@ -10,7 +10,8 @@ from services.db import get_db
 from services.scanner import scan_ingredients, calculate_safety_score, derive_display_scores
 from services.ocr import extract_ingredients_from_image
 from services.search import enrich_with_research_urls
-from models.schemas import ScanRequest, ScanResponse
+from services.product_lookup import find_ingredients_by_product_name
+from models.schemas import ScanRequest, ScanResponse, ProductNameScanRequest
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/scan", tags=["Scan"])
@@ -44,6 +45,54 @@ async def scan_text(
 
     logger.info(
         f"Scan complete — {len(results)} ingredients, {flagged_count} flagged, score={score}"
+    )
+
+    return ScanResponse(
+        product_name=payload.product_name,
+        total_ingredients=len(results),
+        flagged_count=flagged_count,
+        safety_score=score,
+        score_out_of_10=score_out_of_10,
+        star_rating=star_rating,
+        safety_label=label,
+        results=results,
+    )
+
+
+@router.post("/product-name", response_model=ScanResponse)
+async def scan_product_name(
+    payload: ProductNameScanRequest,
+    db: AsyncIOMotorDatabase = Depends(get_db),
+):
+    """
+    Accepts only a product name — searches the web for that product's real
+    ingredients list, then scans it the same way as /scan/text.
+    """
+    try:
+        ingredients_text = await find_ingredients_by_product_name(payload.product_name)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        logger.error(f"Product-name lookup failed: {e}")
+        raise HTTPException(status_code=502, detail="Search service failed. Please try again.")
+
+    results = await scan_ingredients(db, ingredients_text)
+
+    if not results:
+        raise HTTPException(
+            status_code=400,
+            detail="Found the product but couldn't parse a usable ingredients list from it.",
+        )
+
+    results = await enrich_with_research_urls(results)
+
+    score, label = calculate_safety_score(results)
+    score_out_of_10, star_rating = derive_display_scores(score)
+    flagged_count = sum(1 for r in results if r.is_flagged)
+
+    logger.info(
+        f"Product-name scan complete — '{payload.product_name}', "
+        f"{len(results)} ingredients, {flagged_count} flagged, score={score}"
     )
 
     return ScanResponse(

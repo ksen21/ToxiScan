@@ -5,14 +5,20 @@ import { useRef, useState } from "react";
 interface UploadFormProps {
   onSubmitText: (ingredientsText: string, productName: string) => void;
   onSubmitImage: (file: File, productName: string) => void;
+  onSubmitProductName: (productName: string) => void;
   disabled?: boolean;
 }
 
 const MAX_IMAGE_MB = 8;
 const ALLOWED_TYPES = ["image/jpeg", "image/png", "image/webp"];
 
-export default function UploadForm({ onSubmitText, onSubmitImage, disabled }: UploadFormProps) {
-  const [mode, setMode] = useState<"text" | "image">("text");
+export default function UploadForm({
+  onSubmitText,
+  onSubmitImage,
+  onSubmitProductName,
+  disabled,
+}: UploadFormProps) {
+  const [mode, setMode] = useState<"text" | "image" | "name">("text");
   const [productName, setProductName] = useState("");
   const [ingredientsText, setIngredientsText] = useState("");
   const [file, setFile] = useState<File | null>(null);
@@ -40,47 +46,75 @@ export default function UploadForm({ onSubmitText, onSubmitImage, disabled }: Up
     if (mode === "text") {
       if (ingredientsText.trim().length < 3) return;
       onSubmitText(ingredientsText.trim(), productName.trim());
-    } else {
+    } else if (mode === "image") {
       if (!file) return;
       onSubmitImage(file, productName.trim());
+    } else {
+      if (productName.trim().length < 2) return;
+      onSubmitProductName(productName.trim());
     }
   }
 
   const canSubmit =
-    mode === "text" ? ingredientsText.trim().length >= 3 : !!file && !fileError;
+    mode === "text"
+      ? ingredientsText.trim().length >= 3
+      : mode === "image"
+      ? !!file && !fileError
+      : productName.trim().length >= 2;
 
   return (
     <form onSubmit={handleSubmit} className="space-y-5">
       <div className="flex gap-1 rounded-lg border border-line bg-surface p-1">
-        {(["text", "image"] as const).map((m) => (
+        {(["text", "image", "name"] as const).map((m) => (
           <button
             key={m}
             type="button"
             onClick={() => setMode(m)}
-            className={`flex-1 rounded-md py-2 text-sm font-medium transition-colors ${
+            className={`flex-1 rounded-md py-2 text-xs font-medium transition-colors sm:text-sm ${
               mode === m ? "bg-ink text-paper" : "text-ink-muted hover:text-ink"
             }`}
           >
-            {m === "text" ? "Paste ingredients" : "Upload a photo"}
+            {m === "text" ? "Paste ingredients" : m === "image" ? "Upload a photo" : "Search by name"}
           </button>
         ))}
       </div>
 
-      <div>
-        <label htmlFor="product_name" className="mb-1.5 block text-xs font-medium text-ink-muted">
-          Product name <span className="text-ink-faint">(optional)</span>
-        </label>
-        <input
-          id="product_name"
-          type="text"
-          value={productName}
-          onChange={(e) => setProductName(e.target.value)}
-          placeholder="e.g. CeraVe Moisturizing Cream"
-          className="w-full rounded-lg border border-line bg-surface px-3 py-2.5 text-sm text-ink placeholder:text-ink-faint focus:border-primary"
-        />
-      </div>
+      {mode === "name" ? (
+        <div>
+          <label htmlFor="product_name_search" className="mb-1.5 block text-xs font-medium text-ink-muted">
+            Product name or page link
+          </label>
+          <input
+            id="product_name_search"
+            type="text"
+            value={productName}
+            onChange={(e) => setProductName(e.target.value)}
+            placeholder="e.g. Lakme 9to5 Hya Beach Edit Lipstick — or paste a product page URL"
+            className="w-full rounded-lg border border-line bg-surface px-3 py-2.5 text-sm text-ink placeholder:text-ink-faint focus:border-primary"
+          />
+          <p className="mt-1 text-xs text-ink-faint">
+            We&apos;ll search the web for this product&apos;s ingredients list — or, for the most
+            reliable result, paste a direct link to the product page. If we can&apos;t find one,
+            try pasting ingredients or uploading a photo instead.
+          </p>
+        </div>
+      ) : (
+        <div>
+          <label htmlFor="product_name" className="mb-1.5 block text-xs font-medium text-ink-muted">
+            Product name <span className="text-ink-faint">(optional)</span>
+          </label>
+          <input
+            id="product_name"
+            type="text"
+            value={productName}
+            onChange={(e) => setProductName(e.target.value)}
+            placeholder="e.g. CeraVe Moisturizing Cream"
+            className="w-full rounded-lg border border-line bg-surface px-3 py-2.5 text-sm text-ink placeholder:text-ink-faint focus:border-primary"
+          />
+        </div>
+      )}
 
-      {mode === "text" ? (
+      {mode === "text" && (
         <div>
           <label htmlFor="ingredients_text" className="mb-1.5 block text-xs font-medium text-ink-muted">
             Ingredients list
@@ -97,7 +131,9 @@ export default function UploadForm({ onSubmitText, onSubmitImage, disabled }: Up
             Separate ingredients with commas, exactly as printed on the label.
           </p>
         </div>
-      ) : (
+      )}
+
+      {mode === "image" && (
         <div>
           <label className="mb-1.5 block text-xs font-medium text-ink-muted">Label photo</label>
           <div
@@ -144,7 +180,7 @@ export default function UploadForm({ onSubmitText, onSubmitImage, disabled }: Up
         disabled={!canSubmit || disabled}
         className="w-full rounded-lg bg-primary py-3 text-sm font-medium text-white transition-colors hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-40"
       >
-        Scan ingredients
+        {mode === "name" ? "Search & scan" : "Scan ingredients"}
       </button>
     </form>
   );
