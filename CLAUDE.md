@@ -123,4 +123,8 @@ Both analyze endpoints return same response schema (see schemas.py).
 
 > Update this section at the start of each session.
 
-Phase 1: MongoDB setup + FastAPI backend skeleton + text analysis endpoint (no AI yet — hardcode test chemicals).
+Phase 6 done: Tavily web search integration (services/search.py) — fetches temporary research_url for flagged chemicals missing one in DB, capped at 5 calls/request, not saved to DB.
+
+Next: Phase 7 — harden scoring.py edge cases + unit tests (tests/test_scoring.py).
+
+Note: actual implementation diverged from this file's original sketch — endpoints are `/scan/text` + `/scan/image` (not `/analyze/*`), OCR/vision uses Groq directly (not NaraRouter), safety score is 0-100 (not 0-10). Treat scanner.py/scan.py/schemas.py as source of truth over old prose above until this file is fully updated.

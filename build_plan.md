@@ -273,7 +273,7 @@ Expected score: 10 - 2.5 - 1.5 = 6.0 → CAUTION verdict
 | 3 | Text Endpoint (No AI) | ⬜ TODO |
 | 4 | NaraRouter Text Model | ⬜ TODO |
 | 5 | Vision Model + Image Endpoint | ⬜ TODO |
-| 6 | Tavily Web Search | ⬜ TODO |
+| 6 | Tavily Web Search | ✅ DONE |
 | 7 | Scoring Finalize + Tests | ⬜ TODO |
 | 8 | Next.js Frontend | ⬜ TODO |
 | 9 | Polish | ⬜ TODO |
