@@ -6,3 +6,74 @@ __pycache__/
 .pytest_cache/
 backend/venv/
 backend/__pycache__/
+
+# Node.js / Next.js
+##################################################
+
+frontend/node_modules/
+
+frontend/.next/
+frontend/out/
+
+frontend/.turbo/
+frontend/.env.local
+frontend/.vercel/
+
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+frontend/pnpm-debug.log*
+
+
+##################################################
+# Build Artifacts
+##################################################
+
+dist/
+build/
+
+##################################################
+# Database
+##################################################
+
+*.sqlite3
+*.db
+
+##################################################
+# Logs
+##################################################
+
+logs/
+*.log
+
+# Secrets / Certificates
+##################################################
+
+*.pem
+*.key
+*.crt
+*.p12
+
+##################################################
+# IDE
+##################################################
+
+.vscode/
+.idea/
+
+*.iml
+
+# Cache
+##################################################
+
+.cache/
+.pytest_cache/
+
+
+# Temporary Files
+##################################################
+
+*.tmp
+*.temp
+*.swp
+*.swo

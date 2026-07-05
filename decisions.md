@@ -179,120 +179,122 @@ Additional issues found & fixed during testing:
 groq client raised TypeError: AsyncClient.__init__() got an unexpected keyword argument 'proxies' — caused by httpx==0.28.0 removing the proxies kwarg that the installed groq version still passed internally. Fix: pinned httpx==0.27.2 in requirements.txt.
 MongoDB connection started failing with SSLV1_ALERT_INTERNAL_ERROR / TLSV1_ALERT_INTERNAL_ERROR across all shard servers (ServerSelectionTimeoutError) after the Python 3.12 venv was recreated. Root cause was environmental (Atlas IP whitelist / antivirus SSL inspection on Windows), not application code — resolved after checking Atlas Network Access and system SSL interception settings. Added certifi.where() as an explicit tlsCAFile in services/db.py as a defensive measure for Windows CA store issues
 
-
+---
 
 ## Phase 6 — Tavily Web Search Integration (Completed: 2026-07-03)
 
-What was built:
+**What was built:**
+- `services/search.py` — `enrich_with_research_urls(results)`:
+  - Only queries chemicals that are `is_flagged=True`, have a `matched_chemical`, and `research_url is None`.
+  - Query format: `"{chemical_name} cancer carcinogen cosmetic research study"`, `max_results=1`.
+  - Hard cap: `MAX_TAVILY_CALLS_PER_REQUEST = 5`, enforced with a running counter — loop breaks the moment the cap is hit, regardless of how many chemicals still need a URL.
+  - `tavily-python`'s `TavilyClient` is sync-only, so the actual call runs via `asyncio.to_thread()` to avoid blocking the event loop.
+  - Tavily errors/empty results → caught, logged, `research_url` stays `None` — never raised to the route handler.
+  - Results are set only on the in-memory `IngredientResult` objects for this response — never written back to MongoDB (matches project_rule.md: manual admin decision to add permanent URLs).
+  - Logs `"Tavily usage — N call(s) this request"` once per request (only if calls were made) for free-tier (1,000/month) monitoring.
+  - If `TAVILY_API_KEY` isn't set in `.env`, the client init is skipped and enrichment is a no-op (logged once) — app doesn't crash without a key.
+- Wired into both `POST /scan/text` and `POST /scan/image` in `routers/scan.py`, called once right after `scan_ingredients()` and before `calculate_safety_score()` (score itself is unaffected by research_url).
+- `models/schemas.py` — added `research_url: Optional[str] = None` to `IngredientResult`.
+- `services/config.py` / `env.example` — added `TAVILY_API_KEY`.
+- `requirements.txt` — added `tavily-python==0.5.0`.
 
+**Bug found & fixed while wiring this up:**
+- `services/scanner.py::match_ingredient()` was reading `doc.get("concerns", [])` from MongoDB, but the actual seeded chemical documents use the field name `danger_type` (see `chemical_template.json`, `seed_chemicals.py`) — `concerns` doesn't exist in the DB at all, so this was always returning `[]` silently since Phase 3. Fixed to `doc.get("danger_type", [])`. Also added `research_url=doc.get("research_url")` in the same place, needed for Phase 6 to know which chemicals already have a permanent URL.
 
-services/search.py — enrich_with_research_urls(results):
+**Not yet verified live:** `tavily-python` could not be pip-installed or hit in this sandbox (no network access / no `TAVILY_API_KEY` available here). Logic (5-call cap, skip-if-already-has-url, skip-if-not-flagged, mutate-in-place) was verified with a mocked `TavilyClient` — all cases pass. **TODO next session:** run a real `/scan/text` request locally with a valid `TAVILY_API_KEY` against a chemical known to have `research_url: null` in DB (e.g. Imidazolidinyl Urea, Fragrance, Talc — see seed_chemicals.py) and confirm a real URL comes back in the response.
 
-Only queries chemicals that are is_flagged=True, have a matched_chemical, and research_url is None.
-Query format: "{chemical_name} cancer carcinogen cosmetic research study", max_results=1.
-Hard cap: MAX_TAVILY_CALLS_PER_REQUEST = 5, enforced with a running counter — loop breaks the moment the cap is hit, regardless of how many chemicals still need a URL.
-tavily-python's TavilyClient is sync-only, so the actual call runs via asyncio.to_thread() to avoid blocking the event loop.
-Tavily errors/empty results → caught, logged, research_url stays None — never raised to the route handler.
-Results are set only on the in-memory IngredientResult objects for this response — never written back to MongoDB (matches project_rule.md: manual admin decision to add permanent URLs).
-Logs "Tavily usage — N call(s) this request" once per request (only if calls were made) for free-tier (1,000/month) monitoring.
-If TAVILY_API_KEY isn't set in .env, the client init is skipped and enrichment is a no-op (logged once) — app doesn't crash without a key.
+**Verified (offline, mocked):**
+- 8 flagged chemicals missing `research_url` → exactly 5 Tavily calls made, 5 enriched, 3 skipped.
+- Chemical that already has a `research_url` → left untouched, no Tavily call.
+- Non-flagged ingredient → left untouched, no Tavily call.
+- Missing `TAVILY_API_KEY` → enrichment no-ops cleanly, no crash.
 
+**Live-tested by user (2026-07-05):** `/scan/text` with `Water, Fragrance, Talc, Parabens` — Fragrance and Parabens (matched to Methylparaben) both came back with real `research_url` values (EWG Skin Deep, NCBI PMC article). Talc correctly stayed unmatched (`is_flagged: false`, not in DB yet). Confirmed working end-to-end with a real `TAVILY_API_KEY`.
 
+---
 
-Wired into both POST /scan/text and POST /scan/image in routers/scan.py, called once right after scan_ingredients() and before calculate_safety_score() (score itself is unaffected by research_url).
-models/schemas.py — added research_url: Optional[str] = None to IngredientResult.
-services/config.py / env.example — added TAVILY_API_KEY.
-requirements.txt — added tavily-python==0.5.0.
+## Score display update (2026-07-05)
 
+Added `score_out_of_10` (e.g. `6.6`) and `star_rating` (e.g. `3.3`, out of 5) to `ScanResponse`, computed by new `derive_display_scores()` in `services/scanner.py`. `safety_score` (0-100) is unchanged — these are display-only derived fields so the existing severity-penalty math (tuned for the 100 scale) doesn't need to change. Wired into both `/scan/text` and `/scan/image`.
 
-Bug found & fixed while wiring this up:
-
-
-services/scanner.py::match_ingredient() was reading doc.get("concerns", []) from MongoDB, but the actual seeded chemical documents use the field name danger_type (see chemical_template.json, seed_chemicals.py) — concerns doesn't exist in the DB at all, so this was always returning [] silently since Phase 3. Fixed to doc.get("danger_type", []). Also added research_url=doc.get("research_url") in the same place, needed for Phase 6 to know which chemicals already have a permanent URL.
-
-
-Not yet verified live: tavily-python could not be pip-installed or hit in this sandbox (no network access / no TAVILY_API_KEY available here). Logic (5-call cap, skip-if-already-has-url, skip-if-not-flagged, mutate-in-place) was verified with a mocked TavilyClient — all cases pass. TODO next session: run a real /scan/text request locally with a valid TAVILY_API_KEY against a chemical known to have research_url: null in DB (e.g. Imidazolidinyl Urea, Fragrance, Talc — see seed_chemicals.py) and confirm a real URL comes back in the response.
-
-Verified (offline, mocked):
-
-
-8 flagged chemicals missing research_url → exactly 5 Tavily calls made, 5 enriched, 3 skipped.
-Chemical that already has a research_url → left untouched, no Tavily call.
-Non-flagged ingredient → left untouched, no Tavily call.
-Missing TAVILY_API_KEY → enrichment no-ops cleanly, no crash.
-
-
-Live-tested by user (2026-07-05): /scan/text with Water, Fragrance, Talc, Parabens — Fragrance and Parabens (matched to Methylparaben) both came back with real research_url values (EWG Skin Deep, NCBI PMC article). Talc correctly stayed unmatched (is_flagged: false, not in DB yet). Confirmed working end-to-end with a real TAVILY_API_KEY.
-
-
-Score display update (2026-07-05)
-
-Added score_out_of_10 (e.g. 6.6) and star_rating (e.g. 3.3, out of 5) to ScanResponse, computed by new derive_display_scores() in services/scanner.py. safety_score (0-100) is unchanged — these are display-only derived fields so the existing severity-penalty math (tuned for the 100 scale) doesn't need to change. Wired into both /scan/text and /scan/image.
-
+---
 
 ## Phase 7 — Safety Scoring Logic Finalize + Tests (Completed: 2026-07-05)
 
-Note on scale drift: build_plan.md's original Phase 7 sketch assumed the SPEC.md 0-10 scale with SAFE/CAUTION/AVOID labels and a separate scoring.py file. Actual implementation (since Phase 3) uses the 0-100 scale with Safe/Moderate/Risky/Dangerous labels, living in services/scanner.py — tests were written against the real implementation, not the old sketch.
+**Note on scale drift:** build_plan.md's original Phase 7 sketch assumed the SPEC.md 0-10 scale with SAFE/CAUTION/AVOID labels and a separate `scoring.py` file. Actual implementation (since Phase 3) uses the 0-100 scale with Safe/Moderate/Risky/Dangerous labels, living in `services/scanner.py` — tests were written against the real implementation, not the old sketch.
 
-What was built:
+**What was built:**
+- Refactored `services/scanner.py`: pulled the label-threshold logic out of `calculate_safety_score()` into a standalone `score_to_label(score: int) -> str`. Behavior is 100% identical — this just makes the boundaries independently unit-testable for any integer 0-100, not only scores reachable by summing `SEVERITY_PENALTY` values (5, 12, 22, 35 don't evenly reach every integer, e.g. 84/59/34 aren't reachable via sums, but still need boundary coverage).
+- `backend/tests/test_scoring.py` (new) — covers:
+  - All-safe / empty results → 100, "Safe"
+  - Single HIGH → 78, "Moderate"
+  - 5x CRITICAL → clamped to 0 (not negative), "Dangerous"
+  - Mixed severities → exact math (100 - (5+12+22+35) = 26, "Dangerous")
+  - `is_flagged=True` with `severity=None` → no deduction (guards the `if r.is_flagged and r.severity` check)
+  - `is_flagged=False` with severity set anyway → no deduction (defensive, shouldn't happen in real data)
+  - All 8 label-boundary values (100/85/84/60/59/35/34/0) via `score_to_label()` directly
+  - `derive_display_scores()` — exact values incl. non-round ones (73 → 7.3/3.6, 85 → 8.5/4.2) and a 0-100 sweep asserting bounds never exceeded
+- Added `pytest==8.3.4` to `requirements.txt`, `backend/tests/__init__.py` for package discovery.
 
+**Type hints:** already present on all scoring functions (`split_ingredients`, `match_ingredient`, `scan_ingredients`, `calculate_safety_score`, `score_to_label`, `derive_display_scores`) — no changes needed there.
 
-Refactored services/scanner.py: pulled the label-threshold logic out of calculate_safety_score() into a standalone score_to_label(score: int) -> str. Behavior is 100% identical — this just makes the boundaries independently unit-testable for any integer 0-100, not only scores reachable by summing SEVERITY_PENALTY values (5, 12, 22, 35 don't evenly reach every integer, e.g. 84/59/34 aren't reachable via sums, but still need boundary coverage).
-backend/tests/test_scoring.py (new) — covers:
+**Verified (offline):** all test assertions run manually against the real `scanner.py` logic (via lightweight stand-ins for `pydantic`/`motor`, since this sandbox has no network to install them) — all pass. **TODO next session:** run `pytest tests/test_scoring.py -v` for real from inside `backend/` with the actual venv active, to confirm no import-path surprises with real pydantic/motor installed.
 
-All-safe / empty results → 100, "Safe"
-Single HIGH → 78, "Moderate"
-5x CRITICAL → clamped to 0 (not negative), "Dangerous"
-Mixed severities → exact math (100 - (5+12+22+35) = 26, "Dangerous")
-is_flagged=True with severity=None → no deduction (guards the if r.is_flagged and r.severity check)
-is_flagged=False with severity set anyway → no deduction (defensive, shouldn't happen in real data)
-All 8 label-boundary values (100/85/84/60/59/35/34/0) via score_to_label() directly
-derive_display_scores() — exact values incl. non-round ones (73 → 7.3/3.6, 85 → 8.5/4.2) and a 0-100 sweep asserting bounds never exceeded
+**Live-tested by user (2026-07-05):** `pytest tests/test_scoring.py -v` — initially 6/22 failed with `NameError: name 'star_ratings' is not defined` (typo in `derive_display_scores` return statement — `star_ratings` vs `star_rating`). Fixed the typo. Re-ran: **all 22/22 tests pass.** Phase 7 fully done.
 
-
-
-Added pytest==8.3.4 to requirements.txt, backend/tests/__init__.py for package discovery.
-
-
-Type hints: already present on all scoring functions (split_ingredients, match_ingredient, scan_ingredients, calculate_safety_score, score_to_label, derive_display_scores) — no changes needed there.
-
-Verified (offline): all test assertions run manually against the real scanner.py logic (via lightweight stand-ins for pydantic/motor, since this sandbox has no network to install them) — all pass. TODO next session: run pytest tests/test_scoring.py -v for real from inside backend/ with the actual venv active, to confirm no import-path surprises with real pydantic/motor installed.
-
-Live-tested by user (2026-07-05): pytest tests/test_scoring.py -v — initially 6/22 failed with NameError: name 'star_ratings' is not defined (typo in derive_display_scores return statement — star_ratings vs star_rating). Fixed the typo. Re-ran: all 22/22 tests pass. Phase 7 fully done.
-
+---
 
 ## Session Summary — 2026-07-05 (Phase 6 + Phase 7 + score display update)
 
 Everything below was completed and verified in today's session, backend-only (frontend/Phase 8 not started yet).
 
-## 1. Phase 6 — Tavily Web Search Integration
+**1. Phase 6 — Tavily Web Search Integration**
+- New `services/search.py`: `enrich_with_research_urls()` — fetches a temporary `research_url` from Tavily for flagged chemicals missing one in MongoDB, capped at 5 calls/request, never written back to DB, degrades silently if `TAVILY_API_KEY` is unset or a call fails.
+- Wired into both `POST /scan/text` and `POST /scan/image` in `routers/scan.py`, right after matching and before scoring.
+- `models/schemas.py`: added `research_url: Optional[str]` to `IngredientResult`.
+- `services/config.py` + `env.example`: added `TAVILY_API_KEY`.
+- `requirements.txt`: added `tavily-python==0.5.0`.
+- **Bug fixed:** `scanner.py::match_ingredient()` was reading a non-existent `concerns` field from MongoDB docs — actual DB field is `danger_type` (see `chemical_template.json`). Silently returned `[]` since Phase 3. Fixed to `doc.get("danger_type", [])`, and added `research_url=doc.get("research_url")` in the same place.
+- **Live-verified by user:** real `/scan/text` call with Fragrance + Parabens returned real Tavily URLs (EWG Skin Deep, NCBI PMC); Talc correctly stayed unmatched.
 
+**2. Score display update**
+- Added `score_out_of_10` (e.g. `6.6`) and `star_rating` (e.g. `3.3`, out of 5) to `ScanResponse`, via new `derive_display_scores()` in `scanner.py`. `safety_score` (0-100) itself is untouched — these are pure display-derived fields for the frontend's "6.6/10" text + star widgets.
 
-New services/search.py: enrich_with_research_urls() — fetches a temporary research_url from Tavily for flagged chemicals missing one in MongoDB, capped at 5 calls/request, never written back to DB, degrades silently if TAVILY_API_KEY is unset or a call fails.
-Wired into both POST /scan/text and POST /scan/image in routers/scan.py, right after matching and before scoring.
-models/schemas.py: added research_url: Optional[str] to IngredientResult.
-services/config.py + env.example: added TAVILY_API_KEY.
-requirements.txt: added tavily-python==0.5.0.
-Bug fixed: scanner.py::match_ingredient() was reading a non-existent concerns field from MongoDB docs — actual DB field is danger_type (see chemical_template.json). Silently returned [] since Phase 3. Fixed to doc.get("danger_type", []), and added research_url=doc.get("research_url") in the same place.
-Live-verified by user: real /scan/text call with Fragrance + Parabens returned real Tavily URLs (EWG Skin Deep, NCBI PMC); Talc correctly stayed unmatched.
+**3. Phase 7 — Safety Scoring Logic Finalize + Tests**
+- Refactored `calculate_safety_score()` to pull label-threshold logic into a standalone `score_to_label(score) -> str`, so all 8 boundary values (100/85/84/60/59/35/34/0) are independently testable.
+- New `backend/tests/test_scoring.py` (22 tests) covering: all-safe/empty, single/multiple severities, score clamping at 0, mixed-severity math, missing-severity edge cases, every label boundary, and `derive_display_scores()` correctness incl. non-round values.
+- Added `pytest==8.3.4` to `requirements.txt`.
+- **Bug found & fixed by user:** typo `star_ratings` → `star_rating` in `derive_display_scores()`'s return statement (caught by the new tests — 6/22 failed until fixed).
+- **Live-verified by user:** `pytest tests/test_scoring.py -v` → **22/22 pass.**
 
+**Files touched today:** `services/search.py` (new), `routers/scan.py`, `services/scanner.py`, `models/schemas.py`, `services/config.py`, `env.example`, `requirements.txt`, `tests/test_scoring.py` (new), `tests/__init__.py` (new), `build_plan.md` (Phase 6 + 7 marked done), `CLAUDE.md` (current focus updated).
 
-2. Score display update
+**Status:** Phases 1-7 complete and live-verified. Phase 8 (Next.js Frontend) starting next.
 
+---
 
-Added score_out_of_10 (e.g. 6.6) and star_rating (e.g. 3.3, out of 5) to ScanResponse, via new derive_display_scores() in scanner.py. safety_score (0-100) itself is untouched — these are pure display-derived fields for the frontend's "6.6/10" text + star widgets.
+## Phase 8 — Next.js Frontend (Completed: 2026-07-05)
 
+**Design direction (deliberate, not templated):** clinical lab-report aesthetic — paper-white background (#FAFAF8), hairline borders, monospace (IBM Plex Mono) for scores/chemical names like a lab readout, Space Grotesk for display headings, Inter for body text. Explicitly avoided the common AI-generated defaults (cream+terracotta, dark+neon). Signature element: `ScoreGauge` — a semi-circular dial with colored hazard zones and a needle that sweeps to the reading on mount, echoing a real lab instrument rather than a generic progress bar.
 
-3. Phase 7 — Safety Scoring Logic Finalize + Tests
+**What was built** (`frontend/`, hand-authored — this sandbox has no network access to run `npx create-next-app` or `npm install`):
+- `package.json`, `tsconfig.json`, `next.config.mjs`, `tailwind.config.ts` (design tokens: paper/ink/line/safe/caution/risky/danger/primary), `postcss.config.mjs`, `.env.local.example` (`NEXT_PUBLIC_API_URL`)
+- `lib/types.ts` — mirrors backend `ScanResponse`/`IngredientResult` exactly (incl. `research_url`, `score_out_of_10`, `star_rating` from Phase 6/7)
+- `lib/api.ts` — `scanText()` / `scanImage()`, throws parsed `detail` message from FastAPI's error responses
+- `lib/tone.ts` — maps `safety_label` (Safe/Moderate/Risky/Dangerous) and `severity` (low/moderate/high/critical) to consistent color tokens, used everywhere so color logic lives in one place
+- `components/ScoreGauge.tsx` — the signature element described above
+- `components/Verdict.tsx` — plain-language banner (icon + one-line explanation + flagged count), colored by tone
+- `components/ChemicalCard.tsx` — specimen-tag styled card: chemical name (mono), severity chip, concern pills, "Read the research" link (opens `research_url` in a new tab)
+- `components/ResultCard.tsx` — top-level container: product name header, gauge, verdict, flagged-ingredient grid, **"No harmful chemicals detected" empty state** (green checkmark, pulled forward from Phase 9 since it was trivial alongside this), collapsible "All ingredients" list, "Check another product" reset button
+- `components/UploadForm.tsx` — tab toggle (paste text / upload photo), optional product name, textarea with live validation, drag-and-drop image upload with **preview before submit**, client-side file type (JPEG/PNG/WebP) + size (8MB, matches backend's `MAX_IMAGE_SIZE_MB`) validation before hitting the API
+- `components/Skeletons.tsx` — **`ResultSkeleton`**: shimmer skeleton shaped exactly like the real `ResultCard` (gauge circle, verdict bar, chemical card grid), so loading never causes layout jump
+- `app/page.tsx` — full state machine (`idle` / `loading` / `success` / `error`), **cold-start detection**: if a request is still pending after 5s, shows a "Waking up the server…" banner above the skeleton (common on free-tier hosts with cold starts)
+- `app/layout.tsx` / `app/globals.css` — Google Fonts via `next/font`, `prefers-reduced-motion` respected, visible focus rings, shimmer keyframes
 
+**Responsive:** single-column mobile-first layout (`max-w-xl` container), chemical card grid drops to 1 column below `sm:`. Mentally verified against a 375px viewport; **not yet verified in a real browser** (no network/npm in this sandbox).
 
-Refactored calculate_safety_score() to pull label-threshold logic into a standalone score_to_label(score) -> str, so all 8 boundary values (100/85/84/60/59/35/34/0) are independently testable.
-New backend/tests/test_scoring.py (22 tests) covering: all-safe/empty, single/multiple severities, score clamping at 0, mixed-severity math, missing-severity edge cases, every label boundary, and derive_display_scores() correctness incl. non-round values.
-Added pytest==8.3.4 to requirements.txt.
-Bug found & fixed by user: typo star_ratings → star_rating in derive_display_scores()'s return statement (caught by the new tests — 6/22 failed until fixed).
-Live-verified by user: pytest tests/test_scoring.py -v → 22/22 pass.
-
-
-Files touched today: services/search.py (new), routers/scan.py, services/scanner.py, models/schemas.py, services/config.py, env.example, requirements.txt, tests/test_scoring.py (new), tests/__init__.py (new), build_plan.md (Phase 6 + 7 marked done), CLAUDE.md (current focus updated).
-
-Status: Phases 1-7 complete and live-verified. Phase 8 (Next.js Frontend) starting next.
+**Not yet verified live — TODO next session:**
+1. `cd frontend && npm install && npm run dev` — install real deps and confirm it builds/compiles (only did bracket-balance checks here, not a real `tsc`/Next build, since `npm install` failed with a 403 in this sandbox — no network egress).
+2. Copy `.env.local.example` → `.env.local`, set `NEXT_PUBLIC_API_URL=http://localhost:8000`, confirm end-to-end flow against the real running backend (text scan, image scan, error states, the >5s cold-start banner).
+3. Resize browser to 375px and confirm nothing overflows/clips.
+4. Confirm no API keys appear in Network tab / page source (there shouldn't be any — frontend never touches `GROQ_API_KEY`/`TAVILY_API_KEY`, only calls own backend).

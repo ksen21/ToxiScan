@@ -1,0 +1,56 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background-color: #FAFAF8;
+  color: #15171A;
+}
+
+/* Respect reduced-motion preference */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Visible keyboard focus ring everywhere, in the brand's ink color */
+:focus-visible {
+  outline: 2px solid #1D4ED8;
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* Shimmer skeleton sweep */
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background-color: #ECECE8;
+}
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.65),
+    transparent
+  );
+  animation: shimmer 1.6s infinite;
+}
+
+/* Hairline rule used throughout — a lab-report "specimen tag" grid line */
+.hairline {
+  border-color: #E3E3DF;
+}
