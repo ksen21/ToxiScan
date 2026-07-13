@@ -36,6 +36,7 @@ import re
 from typing import Optional
 
 from groq import AsyncGroq
+from openai import AsyncOpenAI
 from tavily import TavilyClient
 
 from services.config import settings
@@ -76,11 +77,50 @@ def _cap_content(content: str, limit: int = MAX_CONTENT_CHARS) -> str:
 # pages, so a hit here is higher-confidence than a general web search.
 PREFERRED_INGREDIENT_DOMAINS = ["incidecoder.com"]
 
-_groq_client = AsyncGroq(api_key=settings.GROQ_API_KEY)
+_groq_client = AsyncGroq(api_key=settings.GROQ_API_KEY, timeout=30.0)
+_nara_client: Optional[AsyncOpenAI] = None
+_nara_checked = False
+
+
+def _get_nara_client() -> Optional[AsyncOpenAI]:
+    """
+    Lazily creates the NaraRouter client (OpenAI-compatible SDK, custom
+    base_url). Returns None — logged once — if NARA_ROUTER_API_KEY or
+    NARA_TEXT_MODEL isn't configured, so the caller can fall back to Groq
+    without this being treated as an error.
+    """
+    global _nara_client, _nara_checked
+    if _nara_client is not None:
+        return _nara_client
+    if not settings.NARA_ROUTER_API_KEY or not settings.NARA_TEXT_MODEL:
+        if not _nara_checked:
+            logger.info(
+                "NARA_ROUTER_API_KEY or NARA_TEXT_MODEL not set — product-name "
+                "extraction will use Groq directly instead of NaraRouter."
+            )
+            _nara_checked = True
+        return None
+    _nara_client = AsyncOpenAI(
+        api_key=settings.NARA_ROUTER_API_KEY,
+        base_url=settings.NARA_ROUTER_BASE_URL,
+        timeout=30.0,
+    )
+    return _nara_client
 _tavily_client: Optional[TavilyClient] = None
 _tavily_checked = False
 
 URL_PATTERN = re.compile(r"^https?://", re.IGNORECASE)
+
+# Common separators between a product's core name and shade/variant/size
+# details, e.g. "Lakme 9to5 Lipstick - Coral Pink, 3.6g" -> "Lakme 9to5 Lipstick"
+_VARIANT_SEPARATOR_RE = re.compile(r"[-|–—(]")
+
+
+def _simplify_query(query: str) -> str:
+    """Strips trailing shade/variant/size details for the simplified-query retry."""
+    core = _VARIANT_SEPARATOR_RE.split(query, maxsplit=1)[0].strip()
+    words = core.split()
+    return " ".join(words[:6]) if len(words) > 6 else core
 
 EXTRACTION_PROMPT = (
     "You are given raw web content about a cosmetic/beauty product — it may "
@@ -247,6 +287,25 @@ def _search_sync(product_name: str) -> str:
         return ""
 
 
+TAVILY_CALL_TIMEOUT_S = 20.0
+
+
+async def _call_with_timeout(func, *args) -> str:
+    """
+    Runs a blocking Tavily/httpx call in a thread with a hard timeout.
+    These SDKs don't reliably expose their own timeout knobs from here, so
+    without this a hung network call could block the request indefinitely
+    instead of degrading the way every other failure in this file already
+    does (returns "" and falls through to the next fallback / a clear
+    ValueError). Timeout is treated identically to any other failure.
+    """
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(func, *args), timeout=TAVILY_CALL_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        logger.warning(f"{func.__name__} timed out after {TAVILY_CALL_TIMEOUT_S}s for args={args}")
+        return ""
+
+
 async def find_ingredients_by_product_name(product_name_or_url: str) -> str:
     """
     Looks up `product_name_or_url` and returns a comma-separated
@@ -267,7 +326,7 @@ async def find_ingredients_by_product_name(product_name_or_url: str) -> str:
     is_url = bool(URL_PATTERN.match(query))
 
     if is_url:
-        web_content = await asyncio.to_thread(_extract_url_sync, query)
+        web_content = await _call_with_timeout(_extract_url_sync, query)
         source_note = "direct URL"
         if not web_content:
             raise ValueError(
@@ -285,40 +344,39 @@ async def find_ingredients_by_product_name(product_name_or_url: str) -> str:
             # direct HTTP fetch of the same URL as a second attempt before
             # giving up — a plain requests/httpx GET sometimes picks up
             # server-rendered content that differs from what Tavily crawled.
-            direct = await asyncio.to_thread(_direct_fetch_sync, query)
+            direct = await _call_with_timeout(_direct_fetch_sync, query)
             if direct and _INGREDIENT_KEYWORD_RE.search(direct):
                 logger.info(f"Direct fetch fallback succeeded for '{query}' ({len(direct)} chars).")
                 web_content = direct
                 source_note = "direct URL (httpx fallback)"
     else:
-        web_content = await asyncio.to_thread(_search_preferred_domains_sync, query)
+        web_content = await _call_with_timeout(_search_preferred_domains_sync, query)
         source_note = "curated ingredient database"
         if not web_content:
-            web_content = await asyncio.to_thread(_search_sync, query)
+            web_content = await _call_with_timeout(_search_sync, query)
             source_note = "general web search"
+        if not web_content:
+            # Case: an overly-specific product name (e.g. including a shade,
+            # variant, or size that doesn't appear verbatim anywhere online)
+            # can make an otherwise-findable product fail. Try once more with
+            # a simplified query — the brand + first few words — before
+            # giving up. This is still a REAL web search, never a guess: if
+            # this also finds nothing, we raise exactly like before rather
+            # than fabricating an ingredients list (project_rule.md: "Safety
+            # scoring NEVER done by AI" — that principle extends to never
+            # inventing the underlying ingredient data either).
+            simplified = _simplify_query(query)
+            if simplified and simplified != query:
+                logger.info(f"No results for '{query}', retrying with simplified query '{simplified}'")
+                web_content = await _call_with_timeout(_search_sync, simplified)
+                source_note = "general web search (simplified query)"
         if not web_content:
             raise ValueError(
                 "Couldn't search the web for this product right now. "
                 "Try pasting the ingredients list or uploading a label photo instead."
             )
 
-    response = await _groq_client.chat.completions.create(
-        model=TEXT_MODEL,
-        messages=[
-            {
-                "role": "user",
-                "content": (
-                    f"{EXTRACTION_PROMPT}\n\n"
-                    f"Product: {query}\n\n"
-                    f"Web content:\n{_cap_content(web_content)}"
-                ),
-            }
-        ],
-        temperature=0.1,
-        max_tokens=1024,
-    )
-
-    text = (response.choices[0].message.content or "").strip()
+    text = await _extract_ingredients_text(query, web_content)
 
     if not text or text == "NO_INGREDIENTS_FOUND":
         raise ValueError(
@@ -332,3 +390,56 @@ async def find_ingredients_by_product_name(product_name_or_url: str) -> str:
         f"(url={is_url}, source={source_note})."
     )
     return text
+
+
+async def _extract_ingredients_text(query: str, web_content: str) -> str:
+    """
+    Runs the "extract just the ingredients list" prompt against the raw web
+    content — via NaraRouter (text-only gateway) if configured, otherwise
+    Groq directly. Text product-name lookups (typed OR read off a photo via
+    services/ocr.py's fallback) both funnel through here, so both paths get
+    NaraRouter when it's available — NaraRouter itself is never used for the
+    image/vision step, since it doesn't support image input.
+
+    Resilience: if NaraRouter IS configured but the call fails for any
+    reason (outage, auth error, timeout), falls back to Groq automatically
+    rather than failing the whole lookup — the user still gets a real
+    result either way (per user's explicit choice: availability over
+    strict routing).
+    """
+    prompt_content = (
+        f"{EXTRACTION_PROMPT}\n\nProduct: {query}\n\nWeb content:\n{_cap_content(web_content)}"
+    )
+
+    nara_client = _get_nara_client()
+    if nara_client is not None:
+        try:
+            response = await nara_client.chat.completions.create(
+                model=settings.NARA_TEXT_MODEL,
+                messages=[{"role": "user", "content": prompt_content}],
+                temperature=0.1,
+                max_tokens=1024,
+            )
+            text = (response.choices[0].message.content or "").strip()
+            logger.info(f"Ingredient extraction via NaraRouter ({settings.NARA_TEXT_MODEL}) succeeded.")
+            return text
+        except Exception as e:
+            logger.warning(f"NaraRouter extraction failed, falling back to Groq: {e}")
+            # falls through to the Groq path below
+
+    try:
+        response = await _groq_client.chat.completions.create(
+            model=TEXT_MODEL,
+            messages=[{"role": "user", "content": prompt_content}],
+            temperature=0.1,
+            max_tokens=1024,
+        )
+        return (response.choices[0].message.content or "").strip()
+    except Exception as e:
+        # Case: Groq itself failed here too (auth/rate-limit/outage/timeout) —
+        # distinct from "we searched fine but found nothing", so it should
+        # surface as a 502 (service failure) not a 422 (not found).
+        # Re-raised as-is; routers/scan.py's generic `except Exception`
+        # around this call already maps it to a 502 with a friendly message.
+        logger.error(f"Groq extraction call failed for '{query}': {e}")
+        raise

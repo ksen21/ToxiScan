@@ -70,7 +70,7 @@ exactly this shape:
 Ingredients to classify:
 """
 
-_client = AsyncGroq(api_key=settings.GROQ_API_KEY)
+_client = AsyncGroq(api_key=settings.GROQ_API_KEY, timeout=30.0)
 
 
 async def verify_unflagged_ingredients(results: List[IngredientResult]) -> List[IngredientResult]:

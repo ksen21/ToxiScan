@@ -27,8 +27,12 @@ export interface ScanResponse {
   safety_label: "Safe" | "Moderate" | "Risky" | "Dangerous" | string;
   results: IngredientResult[];
   scanned_at: string;
+  // Transparency note when a fallback path was used (e.g. ingredients came
+  // from a web search using a product name read off a photo, not directly
+  // from that photo). null on the normal, direct paths.
+  source_note: string | null;
 }
 
 export interface ApiErrorShape {
-  detail: string;
+  detail: string | Array<string | { msg: unknown; [key: string]: unknown }>;
 }

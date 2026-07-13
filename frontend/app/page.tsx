@@ -19,60 +19,81 @@ export default function Home() {
   const [slow, setSlow] = useState(false);
   const slowTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  function beginRequest() {
+  // Case: user resets and fires a second scan before the first one's promise
+  // has settled (e.g. "New scan" -> immediately submit again while an old
+  // request is still in flight, or a network retry lands late). Without
+  // this, a slow first request that resolves AFTER a newer one could
+  // overwrite the newer result with stale data. Each request captures the
+  // generation it was started at; only the still-current generation is
+  // allowed to update state when it resolves.
+  const requestGeneration = useRef(0);
+
+  function beginRequest(): number {
+    const generation = ++requestGeneration.current;
     setStatus("loading");
     setSlow(false);
     setErrorMsg(null);
-    slowTimer.current = setTimeout(() => setSlow(true), COLD_START_DELAY_MS);
+    slowTimer.current = setTimeout(() => {
+      if (requestGeneration.current === generation) setSlow(true);
+    }, COLD_START_DELAY_MS);
+    return generation;
   }
 
   function endRequest() {
     if (slowTimer.current) clearTimeout(slowTimer.current);
   }
 
+  function applyResult(generation: number, result: ScanResponse) {
+    if (requestGeneration.current !== generation) return; // stale — a newer request has since started
+    setData(result);
+    setStatus("success");
+  }
+
+  function applyError(generation: number, err: unknown) {
+    if (requestGeneration.current !== generation) return; // stale — a newer request has since started
+    setErrorMsg(err instanceof Error ? err.message : "Something went wrong. Please try again.");
+    setStatus("error");
+  }
+
   async function handleSubmitText(ingredientsText: string, productName: string) {
-    beginRequest();
+    const generation = beginRequest();
     try {
       const result = await scanText(ingredientsText, productName);
-      setData(result);
-      setStatus("success");
+      applyResult(generation, result);
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : "Something went wrong. Please try again.");
-      setStatus("error");
+      applyError(generation, err);
     } finally {
       endRequest();
     }
   }
 
   async function handleSubmitImage(file: File, productName: string) {
-    beginRequest();
+    const generation = beginRequest();
     try {
       const result = await scanImage(file, productName);
-      setData(result);
-      setStatus("success");
+      applyResult(generation, result);
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : "Something went wrong. Please try again.");
-      setStatus("error");
+      applyError(generation, err);
     } finally {
       endRequest();
     }
   }
 
   async function handleSubmitProductName(productName: string) {
-    beginRequest();
+    const generation = beginRequest();
     try {
       const result = await scanByProductName(productName);
-      setData(result);
-      setStatus("success");
+      applyResult(generation, result);
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : "Something went wrong. Please try again.");
-      setStatus("error");
+      applyError(generation, err);
     } finally {
       endRequest();
     }
   }
 
   function reset() {
+    requestGeneration.current++; // invalidates any still-in-flight request
+    endRequest();
     setStatus("idle");
     setData(null);
     setErrorMsg(null);

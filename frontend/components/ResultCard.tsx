@@ -46,25 +46,47 @@ function QuestionMark({ className = "" }: { className?: string }) {
 
 export default function ResultCard({ data, onReset }: ResultCardProps) {
   const [showAll, setShowAll] = useState(false);
-  const flagged = data.results.filter((r) => r.is_flagged);
+
+  // Case: even though api.ts's parseScanResponse already validates the top-
+  // level shape before this component ever renders, guard here too in case
+  // a future caller passes `data` in directly (e.g. from a cached/stored
+  // scan) without going through that validation — `.filter()` on `undefined`
+  // would otherwise crash the whole result view instead of just looking
+  // a little empty.
+  const allResults = Array.isArray(data.results) ? data.results : [];
+
+  const flagged = allResults.filter((r) => r.is_flagged);
   // Only trust "verified_safe" from an actual model classification. Anything
   // else non-flagged — including verification_status === null, which means
   // the verification call didn't run or failed — falls into "uncertain".
   // We never default an unverified ingredient to "good" (see
   // services/ingredient_verify.py for why).
-  const verifiedGood = data.results.filter((r) => !r.is_flagged && r.verification_status === "verified_safe");
-  const uncertain = data.results.filter((r) => !r.is_flagged && r.verification_status !== "verified_safe");
+  const verifiedGood = allResults.filter((r) => !r.is_flagged && r.verification_status === "verified_safe");
+  const uncertain = allResults.filter((r) => !r.is_flagged && r.verification_status !== "verified_safe");
   const isClean = data.flagged_count === 0;
+  // Case: total_ingredients === 0 (e.g. every parsed "ingredient" somehow
+  // matched nothing and got filtered out upstream) would otherwise also
+  // satisfy `isClean` and show a false-positive "No harmful chemicals
+  // detected" — that's a misleading safety claim when we actually found
+  // nothing to check at all. Treat it as its own distinct state instead.
+  const nothingToShow = data.total_ingredients === 0;
 
   return (
     <div className="animate-fade-in space-y-6">
       {/* Top bar: title + a clearly-visible way back to a new scan */}
       <div className="flex items-start justify-between gap-3">
-        <div>
+        <div className="min-w-0">
           <p className="text-xs uppercase tracking-wide text-ink-faint">
             Scan result · {data.total_ingredients} ingredients read
           </p>
-          <h2 className="font-display text-xl font-semibold text-ink">
+          {/* Case: a very long product name (bad OCR read, or a legitimately
+              long name) could otherwise overflow/break this header's layout
+              — truncate with an ellipsis and let the full name show via the
+              title tooltip on hover. */}
+          <h2
+            className="truncate font-display text-xl font-semibold text-ink"
+            title={data.product_name || "Untitled product"}
+          >
             {data.product_name || "Untitled product"}
           </h2>
         </div>
@@ -86,6 +108,36 @@ export default function ResultCard({ data, onReset }: ResultCardProps) {
         </button>
       </div>
 
+      {data.source_note && (
+        <div className="flex items-start gap-2 rounded-lg border border-primary/20 bg-primary/5 px-3 py-2 text-xs text-ink-muted">
+          <svg viewBox="0 0 24 24" fill="none" className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" aria-hidden="true">
+            <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth={1.5} />
+            <path d="M12 8v5M12 16h.01" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" />
+          </svg>
+          <span>{data.source_note}</span>
+        </div>
+      )}
+
+      {nothingToShow ? (
+        <div className="flex flex-col items-center gap-2 rounded-xl border border-caution/30 bg-caution-bg px-6 py-10 text-center">
+          <QuestionMark className="h-10 w-10 text-caution" />
+          <p className="font-display text-base font-semibold text-caution">
+            We couldn&apos;t read any ingredients
+          </p>
+          <p className="max-w-sm text-sm text-ink-muted">
+            Nothing usable came back from this scan — try pasting the ingredients list
+            directly, or a clearer photo of the label.
+          </p>
+          <button
+            type="button"
+            onClick={onReset}
+            className="mt-2 rounded-lg border border-caution/30 bg-surface px-4 py-2 text-sm font-medium text-caution hover:bg-caution-bg"
+          >
+            Try again
+          </button>
+        </div>
+      ) : (
+        <>
       <div className="rounded-xl border border-line bg-surface p-6">
         <ScoreGauge scoreOutOf10={data.score_out_of_10} label={data.safety_label} />
       </div>
@@ -187,7 +239,7 @@ export default function ResultCard({ data, onReset }: ResultCardProps) {
         </button>
         {showAll && (
           <ul className="border-t border-line px-4 py-3">
-            {data.results.map((r, i) => (
+            {allResults.map((r, i) => (
               <li
                 key={`${r.ingredient}-${i}`}
                 className="flex items-center justify-between gap-3 border-b border-line/60 py-2 text-sm last:border-none"
@@ -205,6 +257,8 @@ export default function ResultCard({ data, onReset }: ResultCardProps) {
           </ul>
         )}
       </div>
+        </>
+      )}
 
       <button
         type="button"

@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 MAX_TAVILY_CALLS_PER_REQUEST = 5
 SEARCH_QUERY_SUFFIX = "cancer carcinogen cosmetic research study"
+TAVILY_CALL_TIMEOUT_S = 15.0
 
 _client: Optional[TavilyClient] = None
 _client_checked = False
@@ -91,7 +92,18 @@ async def enrich_with_research_urls(results: List[IngredientResult]) -> List[Ing
         if not result.is_flagged or not result.matched_chemical or result.research_url:
             continue
 
-        url = await asyncio.to_thread(_search_sync, result.matched_chemical)
+        # Case: Tavily hangs (slow network, stalled connection) — bound it
+        # so one slow lookup can't stall the whole scan response. A timeout
+        # degrades exactly like any other Tavily failure: research_url stays
+        # unset, the scan still completes.
+        try:
+            url = await asyncio.wait_for(
+                asyncio.to_thread(_search_sync, result.matched_chemical),
+                timeout=TAVILY_CALL_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"Tavily research-URL lookup timed out for '{result.matched_chemical}'")
+            url = None
         calls_made += 1
         if url:
             result.research_url = url

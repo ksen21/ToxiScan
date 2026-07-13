@@ -56,10 +56,11 @@ class ScanRequest(BaseModel):
     ingredients_text: str = Field(
         ...,
         min_length=3,
+        max_length=20000,  # generous for even long labels, but bounds worst-case input
         description="Raw ingredient list pasted from a product label",
         json_schema_extra={"example": "Water, Sodium Lauryl Sulfate, Parabens, Fragrance"},
     )
-    product_name: Optional[str] = None
+    product_name: Optional[str] = Field(default=None, max_length=300)
 
 
 class ProductNameScanRequest(BaseModel):
@@ -67,6 +68,7 @@ class ProductNameScanRequest(BaseModel):
     product_name: str = Field(
         ...,
         min_length=2,
+        max_length=300,
         description="Product name to search the web for, e.g. 'CeraVe Moisturizing Cream'",
         json_schema_extra={"example": "Lakme 9to5 Hya Beach Edit Lipstick"},
     )
@@ -95,6 +97,12 @@ class ScanResponse(BaseModel):
     safety_label: str                              # "Safe", "Moderate", "Risky", "Dangerous"
     results: List[IngredientResult]
     scanned_at: datetime = Field(default_factory=datetime.utcnow)
+    # Transparency note on WHERE the ingredients actually came from — most
+    # relevant when a fallback path was used (e.g. a photo only showed the
+    # product's front, so we searched the web using the name read off that
+    # same photo instead of the ingredients panel). None for the plain,
+    # direct paths (pasted text / OCR from a label photo).
+    source_note: Optional[str] = None
 
 
 # ─── Health Check ─────────────────────────────────────────────────────────────

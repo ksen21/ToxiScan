@@ -449,3 +449,111 @@ Audited all Phase 11 tasks against the actual codebase before doing new work —
 - All 5 async states (idle/loading/success/error + now render-crash via error boundary) handled
 
 **Phase 11 marked complete in build_plan.md.** Not yet done: a real-browser pass to visually confirm the two new error-boundary pages look right (same sandbox limitation as everywhere else — no npm/network here).
+---
+
+## Phase 12 — Comprehensive edge-case / "always get a result" hardening (2026-07-08)
+
+**Goal (user's explicit ask):** audit the whole app and add every edge-case check needed so that whatever the user does, they never hit a raw crash/hang — always either a real result or a clear, friendly, recoverable message.
+
+### Backend
+
+**`models/schemas.py`**
+- `ScanRequest.ingredients_text`: added `max_length=20000` (was unbounded — a multi-MB paste was previously accepted as valid input).
+- `ScanRequest.product_name` / `ProductNameScanRequest.product_name`: added `max_length=300`.
+
+**`services/scanner.py`**
+- New `MAX_INGREDIENTS_PER_SCAN = 150`. `scan_ingredients()` now raises `ValueError` if the split ingredient list exceeds this — previously an accidental essay/paragraph paste would trigger hundreds of sequential DB round-trips with no cap at all.
+
+**`routers/scan.py`** — rewritten, centralizing the previously-duplicated (3x) matching→scoring tail into one `_finish_scan()` helper so every route gets identical, complete error handling:
+- If: `ingredients_text` / `product_name` is whitespace-only (passes Pydantic's length check on raw chars but is meaningless) → explicit 400 with a clearer message than the generic "nothing parsed" one.
+- If: `scan_ingredients()` raises the new `ValueError` (too many ingredients) → 400 with the exact count and cap.
+- If: MongoDB itself is unreachable/times out mid-request (`PyMongoError`) → 503 "database temporarily unavailable", not a raw 500.
+- If: `enrich_with_research_urls()` or `verify_unflagged_ingredients()` raise anything unexpected → caught and logged, scan continues without that enrichment rather than failing the whole request (both are informational-only by design).
+- If: uploaded file has no filename → 400.
+- If: file content-type isn't JPEG/PNG/WebP → 400, **and now explains HEIC specifically** (iPhones default to it) instead of just listing accepted formats.
+- If: the image is huge → now rejected via **bounded chunked reading** (1MB at a time, bail the instant the cap is crossed) instead of the old `await file.read()` which fully buffered arbitrarily large uploads into memory before ever checking size.
+- If: the image body is empty (0 bytes) despite a valid content-type header → 400.
+- If: OCR/product-lookup raise `ValueError` (genuinely nothing found) → 422 with a suggestion to try another input method; if they raise anything else (Groq/Tavily itself failing) → 502.
+
+**`main.py`**
+- New global `Exception` handler: anything not already caught by a route logs full details server-side, but the client only ever gets a generic `"Something went wrong on our end. Please try again."` — closes the gap where an unanticipated bug would previously return FastAPI's default response with no server-side log trail.
+- New `RequestValidationError` handler: FastAPI's default 422 shape for a Pydantic validation failure is `{"detail": [{"loc":.., "msg":.., "type":..}]}` — an **array of objects**, not a string. Flattened into a single readable string so the frontend's error UI (which expects a plain string) can't be handed a shape that would otherwise render as `[object Object]` or crash.
+- Wired up `slowapi` (was already in `requirements.txt` but never actually used anywhere) — new `services/rate_limit.py` holds the shared `Limiter` instance (separate module to avoid a circular import between `main.py` and `routers/scan.py`). Per-IP limits: `/scan/text` 20/min, `/scan/image` 15/min, `/scan/product-name` 10/min (lowest, since it chains Tavily+Groq and is the most expensive per call). Hitting the limit returns a clean 429, not a crash or a starved server for other users.
+
+**Timeouts on every external call** (previously none anywhere — a hung Groq or Tavily call could block a request indefinitely):
+- `services/ocr.py`, `services/ingredient_verify.py`, `services/product_lookup.py`: `AsyncGroq(..., timeout=30.0)`.
+- `services/product_lookup.py`: new `_call_with_timeout()` wraps every blocking Tavily/httpx call (`asyncio.wait_for`, 20s) — a timeout degrades exactly like any other failure in that file (falls through to the next fallback, or a clear `ValueError`).
+- `services/search.py`: the per-chemical Tavily research-URL lookup is now wrapped the same way (15s) — a slow lookup can no longer stall the whole scan response; `research_url` just stays unset for that one chemical.
+
+### Frontend
+
+**`lib/api.ts`** (rewritten)
+- If: the backend never responds at all → **new `AbortController`-based timeout** (30s text / 60s image & product-name) instead of relying on the browser's own multi-minute TCP timeout — the UI can no longer spin forever.
+- If: the abort fires → distinguishes this from other errors with a specific "took too long, server may be waking up" message.
+- If: `fetch()` throws `TypeError` (offline, DNS failure, CORS block, unreachable host — all indistinguishable at the JS level) → mapped to one friendly, actionable message instead of leaking "Failed to fetch".
+- If: error response body isn't valid JSON at all (HTML error page from a proxy, empty body) → falls back to a status-code-keyed message instead of crashing on `.json()`.
+- If: error `detail` is a **string** (normal case), an **array of objects** (raw Pydantic validation shape, in case it ever reaches the client unflattened), or an **array of strings** → all three now parsed correctly. *(Real bug found during this audit: the old code did `body.detail || fallback`, which for an array just returned the array itself — rendering it in JSX would have crashed with "Objects are not valid as a React child".)*
+- If: the server returns 200 OK but a malformed/incomplete body (not JSON, or missing `results`/`safety_score`) → new `parseScanResponse()` validates the shape before ever handing it to `ResultCard`, throwing a clear "incomplete response" message instead of crashing deep inside rendering.
+- If: `NEXT_PUBLIC_API_URL` was never configured → one-time `console.warn` (dev-facing only, not shown to the user) so a broken deploy is diagnosable immediately instead of every request just mysteriously failing.
+- Status-code-specific fallback messages added for 429 / 502 / 503 / 504 / 413 / other 5xx.
+
+**`lib/types.ts`** — `ApiErrorShape.detail` retyped to `string | Array<string | {msg, ...}>` to match reality (was typed as plain `string`, silently wrong).
+
+**`components/UploadForm.tsx`** (rewritten)
+- If: pasted text or product name is pure punctuation/whitespace (e.g. `",,, ,,"`) — passed the old `length >= 3` check trivially but has no real content → new `hasRealContent()` requires at least one letter/digit.
+- If: dropped file is 0 bytes → rejected client-side with a clear message before ever hitting the network.
+- If: file is HEIC/HEIF (iPhone default format, and browsers often report an empty `type` for it) → specific message explaining why + how to fix it on iPhone, instead of a generic "wrong format".
+- If: file `type` is empty string but the extension is a known-good one (some mobile browsers do this for camera captures) → now accepted via extension fallback instead of being wrongly rejected.
+- If: user double-clicks/double-taps submit before the parent's `disabled` prop re-renders → new local `justSubmitted` lock closes that race window immediately.
+- If: pasted ingredients text or product name exceeds the backend's new `max_length` → client-side `maxLength` + `.slice()` now prevent it from ever being typed past the limit, with a live character counter once close to it (text mode).
+- Object URL for the image preview is now revoked on unmount/file-change (was leaking memory on repeated pick-photo cycles) and mode-switch tabs are disabled while a submission is in flight.
+
+**`app/page.tsx`** (rewritten)
+- If: user hits "New scan" and resubmits before a slow first request has resolved → new request-generation counter ensures a late-arriving stale response can never overwrite a newer one's state.
+
+**`components/ResultCard.tsx`**
+- If: `data.results` is ever missing/not an array (defense in depth — `api.ts` already validates this, but a future caller might bypass it) → defaults to `[]` instead of crashing on `.filter()`.
+- If: `total_ingredients === 0` → previously fell into the same branch as "0 flagged = all clear", which is a false-positive safety claim when there was actually nothing to check at all. Now its own distinct amber "We couldn't read any ingredients" state with a retry button.
+- If: `product_name` is very long → header now truncates with an ellipsis (full name still available via title-attribute tooltip) instead of breaking the layout.
+
+**Not yet live-verified** (same sandbox limitation as always — no npm/network here): all of the above were syntax-checked (`py_compile` for backend, manual bracket-balance parsing for frontend) but not run in a real browser/server. **TODO next session:** `npm install` (no new frontend deps added, so existing `node_modules` should still work) + `pip install -r requirements.txt` (no new backend deps either — `slowapi`/`pymongo` were already present, just newly *used*), then manually exercise: a 0-byte file drop, a HEIC photo, a >150-ingredient paste, rapid double-submit, killing the backend mid-request to see the timeout message, and a deliberately-malformed `.env` (`NEXT_PUBLIC_API_URL` pointing nowhere) to confirm the friendly network-error message appears instead of a raw "Failed to fetch".
+
+---
+
+## Phase 13 — Automatic fallback chains, no fabrication (2026-07-08)
+
+**User's ask:** even in the "found nothing" cases, a professional app should still produce a result somehow.
+
+**What's legitimate vs. not:** per `project_rule.md` ("Safety scoring NEVER done by AI" / "Never ask AI to return a verdict directly"), that principle extends to the underlying ingredient data too — this app must never fabricate/guess an ingredients list, since a wrong ingredient list produces a wrong safety score, which is actively dangerous for a product like this. So "always get a result" was implemented as **"always exhaust every legitimate, sourced path before giving up,"** not as "invent something rather than show an error."
+
+**1. Image → product-name fallback (`services/ocr.py`, `routers/scan.py`):**
+- New `extract_product_name_from_image()` — when the ingredients panel isn't visible in a photo (front-of-box shot), a second Groq vision call tries to read the product's brand/name off the *same* photo instead.
+- `scan_image` now chains: OCR ingredients → (if none) OCR product name → (if found) web search for that name's real ingredients via `find_ingredients_by_product_name()` → only if *that* also fails does the user see an error.
+- Still fully sourced: the fallback ingredients come from a real Tavily/web search, not a guess. New `ScanResponse.source_note` field surfaces this transparently to the user (shown as a small info banner in `ResultCard.tsx`) — e.g. *"No ingredients panel was visible in this photo — these ingredients are from a web search for 'CeraVe Moisturizing Cream', the product name read off the photo."* Never silently substitutes data without telling the user where it actually came from.
+- If the user already typed a product name in the form, their explicit input wins over the photo-detected one.
+
+**2. Product-name search — simplified-query retry (`services/product_lookup.py`):**
+- New `_simplify_query()` — if the full product name (which may include a shade/variant/size, e.g. "Lakme 9to5 Lipstick - Coral Pink, 3.6g") finds nothing, retries once with just the core name (splits on `-|–—(`, caps at 6 words) before giving up. Improves hit-rate for overly-specific input without ever fabricating data.
+- If this *also* finds nothing, the original clear 422 + alternatives message is unchanged — there genuinely isn't a source to draw from at that point, and inventing one would be worse than saying so.
+
+**Not yet live-verified:** syntax-checked only (same sandbox limitation — no network/npm here). **TODO next session:** test with a real front-of-box-only photo (no ingredients panel) and confirm the OCR→name→web-search chain actually fires and returns a real result with `source_note` populated; test an overly-specific product name to confirm the simplified-query retry catches it.
+
+---
+
+## Phase 14 — NaraRouter reintroduced for text-only extraction (2026-07-08)
+
+**Context:** NaraRouter was the *original* planned AI gateway (SPEC.md/CLAUDE.md/project_rule.md all reference it), but the actual Phase 3-13 implementation used Groq directly instead — CLAUDE.md documents this as an intentional divergence. Zero lines of actual code ever called NaraRouter until now.
+
+**User's ask:** whether a product name comes from typed text or is read off a photo (the Phase 13 image→name fallback), pass that name through to NaraRouter for the ingredients-extraction step — NaraRouter doesn't support image input, so vision/OCR (`services/ocr.py`) stays on Groq directly either way.
+
+**Design decision (user's explicit choice when asked):** if NaraRouter is configured but the call fails, **fall back to Groq automatically** rather than surfacing a hard error — availability wins over strict routing. This is a deliberate departure from project_rule.md's original "NaraRouter error → 503" line, which predates this actual implementation; noting the conflict here rather than silently ignoring the older doc.
+
+**What was built:**
+- `services/config.py` — added `NARA_ROUTER_API_KEY`, `NARA_ROUTER_BASE_URL` (defaults to `https://router.bynara.id/v1`), `NARA_TEXT_MODEL` (no default — must be set to a real model alias from NaraRouter's `/v1/models`). Leaving either the key or model blank disables NaraRouter entirely (logged once), not an error.
+- `services/product_lookup.py`:
+  - New `_get_nara_client()` — lazy `AsyncOpenAI` client (OpenAI-compatible SDK) pointed at `NARA_ROUTER_BASE_URL`, mirroring the existing lazy-client pattern already used for Tavily.
+  - New `_extract_ingredients_text()` — the actual "pull the ingredients list out of raw web content" call now tries NaraRouter first (if configured), and falls back to the existing Groq client on ANY failure (timeout, auth, outage) or if NaraRouter isn't configured at all. Both callers of `find_ingredients_by_product_name()` — the direct `/scan/product-name` route AND the Phase 13 image→name fallback in `/scan/image` — funnel through this same function, so both automatically get NaraRouter when available, exactly as asked.
+  - Since `openai` (the SDK) wasn't a dependency yet, added `openai==1.57.0` to `requirements.txt`.
+- `backend.env.example` / `env.example` — documented the three new vars, explicitly noting they're optional (Groq fallback) and vision-exempt.
+
+**Not yet live-verified:** syntax-checked only. **TODO next session:** set a real `NARA_ROUTER_API_KEY` + `NARA_TEXT_MODEL` (check `/v1/models` on the account first for the exact valid alias — decisions.md's original Jul 2026 note guessed "deepseek-3.2" but this was never confirmed against the live API), then confirm via logs that a `/scan/product-name` call actually says `"Ingredient extraction via NaraRouter (...) succeeded"` rather than silently always falling through to Groq. Also worth testing the fallback path deliberately (e.g. temporarily set an invalid `NARA_ROUTER_API_KEY`) to confirm it degrades to Groq without the user ever seeing an error.

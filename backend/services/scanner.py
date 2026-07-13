@@ -39,6 +39,9 @@ SEVERITY_PENALTY = {
 }
 
 
+MAX_INGREDIENTS_PER_SCAN = 150
+
+
 def split_ingredients(raw_text: str) -> List[str]:
     """
     Splits a raw ingredient label string into individual ingredient names.
@@ -118,8 +121,23 @@ async def match_ingredient(db: AsyncIOMotorDatabase, ingredient: str) -> Ingredi
 
 
 async def scan_ingredients(db: AsyncIOMotorDatabase, raw_text: str) -> List[IngredientResult]:
-    """Splits + matches every ingredient in the raw text."""
+    """
+    Splits + matches every ingredient in the raw text.
+
+    Raises ValueError if there are more than MAX_INGREDIENTS_PER_SCAN
+    ingredients — e.g. someone accidentally pasted a whole paragraph/article
+    instead of an ingredient list. Without this cap, a huge list would mean
+    hundreds of sequential DB round-trips (scan_ingredients queries one at a
+    time), which could make the request painfully slow or time out instead
+    of failing fast with a clear, actionable message.
+    """
     ingredients = split_ingredients(raw_text)
+    if len(ingredients) > MAX_INGREDIENTS_PER_SCAN:
+        raise ValueError(
+            f"That's {len(ingredients)} items — more than a single product label "
+            f"usually has. Please paste just the ingredients list (max "
+            f"{MAX_INGREDIENTS_PER_SCAN})."
+        )
     results = [await match_ingredient(db, ing) for ing in ingredients]
     return results
 
